@@ -51,6 +51,38 @@ export default function Watch(){
     return ()=>clearInterval(iv);
   },[v?.id]);
 
+  // Remote-stream playback: when the CDN only serves the file to requests
+  // carrying the embedding page as Referer, play through /api/proxy-stream.
+  // .m3u8 (HLS) sources get hls.js attached unless the browser plays HLS
+  // natively (Safari) — in that case the plain src is used.
+  const playSrc = v ? (v.needsProxy
+    ? `/api/proxy-stream?u=${encodeURIComponent(v.src)}&r=${encodeURIComponent(v.proxyReferer || '')}`
+    : v.src) : '';
+  const isHls = !!v && /\.m3u8(\?|#|$)/i.test(v.src || '');
+  useEffect(()=>{
+    if(!v || v.kind==='youtube' || !playSrc) return;
+    const el = videoRef.current; if(!el) return;
+    let hls = null, cancelled = false;
+    async function attach(){
+      if(isHls && !el.canPlayType('application/vnd.apple.mpegurl')){
+        try{
+          if(!window.Hls){
+            await new Promise((res, rej)=>{ const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1'; s.onload = res; s.onerror = rej; document.body.appendChild(s); });
+          }
+        }catch{ /* CDN unreachable: fall through to plain src */ }
+        if(!cancelled && window.Hls && window.Hls.isSupported()){
+          hls = new window.Hls();
+          hls.loadSource(playSrc);
+          hls.attachMedia(el);
+          return;
+        }
+      }
+      if(!cancelled) el.src = playSrc;
+    }
+    attach();
+    return ()=>{ cancelled = true; if(hls){ try{ hls.destroy(); }catch{} } };
+  },[v?.id, playSrc, isHls]);
+
   // progress persistence
   useEffect(()=>{
     const iv = setInterval(()=>{ if(tRef.current>0) fetch(`/api/videos/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({progress:Math.floor(tRef.current)})}); },5000);
@@ -144,7 +176,7 @@ export default function Watch(){
         <div className="player-wrap" style={{aspectRatio: v.kind==='youtube' ? '16/9' : undefined}}>
           {v.kind==='youtube'
             ? <div style={{position:'absolute',inset:0}}><div id="yt-player" style={{width:'100%',height:'100%'}}></div></div>
-            : <video ref={videoRef} src={v.src} controls style={{width:'100%',display:'block',background:'#000'}}
+            : <video ref={videoRef} controls style={{width:'100%',display:'block',background:'#000'}}
                 onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)}
                 onTimeUpdate={(e)=>setT(e.currentTarget.currentTime)}
                 onSeeked={(e)=>setT(e.currentTarget.currentTime)}/>}

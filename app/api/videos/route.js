@@ -2,6 +2,29 @@ import { requireUser } from '@/lib/api';
 import { readDB, mutate, uid } from '@/lib/store';
 import { SAMPLE } from '@/lib/sample';
 import { splitSentences } from '@/lib/text';
+
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+// Probe a remote stream the way a bare <video> tag would (no Referer). Some
+// CDNs 403 that but happily serve when the embedding page is the Referer —
+// those streams must be played through /api/proxy-stream instead.
+async function probeStream(src, referer){
+  const attempt = async (ref) => {
+    try{
+      const headers = { 'User-Agent': BROWSER_UA, 'Range': 'bytes=0-1023' };
+      if(ref) headers['Referer'] = ref;
+      const r = await fetch(src, { headers, redirect: 'follow', signal: AbortSignal.timeout(12000) });
+      try{ r.body?.cancel(); }catch{}
+      return r.status;
+    }catch{ return 0; }
+  };
+  const direct = await attempt(null);
+  if(direct === 200 || direct === 206) return { needsProxy: false, proxyReferer: null };
+  if(referer){
+    const viaRef = await attempt(referer);
+    if(viaRef === 200 || viaRef === 206) return { needsProxy: true, proxyReferer: referer };
+  }
+  return { needsProxy: false, proxyReferer: null };
+}
 export async function GET(){
   const { user, error } = await requireUser(); if(error) return error;
   const db = readDB();
@@ -33,8 +56,16 @@ export async function POST(req){
       }
     }catch{ /* no captions available */ }
     Object.assign(base, { title: body.title || `YouTube ${ytId}`, kind:'youtube', ytId, src: body.url, thumb:`https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`, duration: sentences.length? sentences[sentences.length-1].end : 0, sentences, transcriptSource: source });
-  } else if(body.kind === 'generic' || body.kind === 'upload'){
-    Object.assign(base, { title: body.title || 'Video', kind: body.kind, src: body.src, thumb: body.thumb||null, duration: 0, sentences: [], transcriptSource:'none' });
+  } else if(body.kind === 'link' || body.kind === 'generic' || body.kind === 'upload'){
+    const isLink = body.kind !== 'upload';
+    const storedKind = body.kind === 'upload' ? 'upload' : 'link';
+    Object.assign(base, { title: body.title || 'Video', kind: storedKind, src: body.src, thumb: body.thumb||null, duration: body.duration || 0, sentences: [], transcriptSource:'none', needsProxy: false, proxyReferer: null });
+    if(isLink && /^https?:\/\//i.test(body.src || '')){
+      const pageRef = body.pageUrl || (()=>{ try{ return new URL(body.src).origin + '/'; }catch{ return null; } })();
+      const probe = await probeStream(body.src, pageRef);
+      base.needsProxy = probe.needsProxy;
+      base.proxyReferer = probe.proxyReferer;
+    }
     if(body.transcriptText){
       const texts = splitSentences(body.transcriptText);
       const per = 5;

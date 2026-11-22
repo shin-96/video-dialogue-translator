@@ -40,13 +40,13 @@ export default function Home(){
     try{
       const r = await fetch('/api/detect-video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
       const j = await r.json(); stop(); setState('open');
-      if(!j.candidates?.length){ setErr('No video found on that page. Try uploading the file, or paste a transcript after creating from an upload.'); return; }
+      if(!j.candidates?.length){ setErr(`No video found on that page.${j.engineNote ? ' ' + j.engineNote : ''} You can also try pasting the direct video/embed link (right-click the player → copy video address), or download the file and upload it instead.`); return; }
       setCandidates(j); setPendingGeneric({ title:j.title });
       if(!j.ambiguous){ pickCandidate(j.candidates[0], j.title); }
     }catch(e){ stop(); setState('open'); setErr(e.message); }
   }
   function pickCandidate(c, title){
-    create({kind:'generic', src:c.src, title: title||'Web video', thumb:c.poster||null, transcriptText: manualText||undefined},
+    create({kind:'link', src:c.src, title: title||'Web video', thumb:c.poster||c.thumb||null, duration:c.duration||undefined, pageUrl:url, transcriptText: manualText||undefined},
       ['Creating project…','Preparing confirmation…']);
   }
   async function submitUpload(file){

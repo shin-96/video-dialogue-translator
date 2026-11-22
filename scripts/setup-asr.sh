@@ -3,5 +3,5 @@
 set -e
 VENV="${ASR_VENV:-$HOME/workspace/vdt-whisper-venv}"
 python3 -m venv "$VENV"
-"$VENV/bin/pip" install -q faster-whisper yt-dlp
+"$VENV/bin/pip" install -q faster-whisper yt-dlp curl-cffi
 echo "ASR venv ready at $VENV"

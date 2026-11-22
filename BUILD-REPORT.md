@@ -122,3 +122,98 @@ phải tua theo, (4) tốc độ chạy chữ lệch nhiều so với giọng đ
   cho timeout 10 phút và nút align có trạng thái chờ, nhưng chưa có hàng đợi nền.
 - YouTube: yt-dlp tải audio có thể bị YouTube chặn theo IP/đợt; khi đó align báo lỗi
   rõ ràng và app vẫn chạy với timing ước lượng.
+
+## Link extraction v2 (2026-11-22, vòng sửa theo phản hồi: "chỉ set link cho YouTube thôi à?")
+
+Trước đây detect-video chỉ regex trên HTML tĩnh (og:video, <video>, src=) nên
+trang nào player nạp bằng JS, hoặc bị anti-bot, đều trả "No video found". V2:
+
+### Kiến trúc (app/api/detect-video/route.js viết lại)
+1. **Direct media short-circuit**: URL kết thúc .mp4/.webm/.mov/.m3u8, hoặc
+   HEAD/ranged-GET trả content-type video/* hay mpegurl → 1 candidate
+   score 100, kind `direct`.
+2. **Deep static scan** (UA trình duyệt thật + Accept-Language): quét TOÀN BỘ
+   HTML gồm cả thân <script> — URL media trần, config kiểu JWPlayer
+   `file:`/`source:`/`sources:` (m3u8 trong script score 55), data-src/data-file;
+   og:video trỏ tới file media score 90, og:video trỏ tới *trang embed*
+   (không có đuôi media, vd player Vimeo) chỉ còn 60 vì <video> không phát
+   trực tiếp được trang đó.
+3. **Iframe embeds**: thu thập tối đa 5 <iframe src>, fetch (10s/cái, sâu 1
+   lớp) và quét cùng bộ quy tắc; candidate gán kind `iframe-embed`, +5 điểm
+   nếu trang iframe giống player.
+4. **Engine yt-dlp** (fallback khi scan tĩnh không ra file media thật hoặc
+   fetch lỗi): chạy `python -m yt_dlp -j` từ chính venv Whisper
+   ($ASR_VENV → ~/workspace/vdt-whisper-venv → scripts/.venv). Ưu tiên file
+   mp4 có cả hình+tiếng (85), rồi manifest m3u8 (80); kèm title/duration/thumb.
+   Nếu URL trang trích không ra, engine thử tiếp URL embed/player mà scan
+   tĩnh tìm được (đây là cách qua được Vimeo, xem dưới). Hai thực tế môi
+   trường được xử lý trong code: `--impersonate chrome` khi venv có curl_cffi
+   (Dailymotion/Cloudflare cần), và `--no-check-certificates` vì proxy chặn
+   TLS khiến bundle certifi của yt-dlp reject chain của nhiều site lớn
+   ("self-signed certificate in certificate chain") trong khi OS store tin
+   chain đó — chỉ ảnh hưởng request metadata, bật lại verification bằng
+   env `VDT_YTDLP_CHECK_CERT=1`. Lỗi của engine được trả về trong `engineNote`,
+   không giả vờ thành công.
+5. **Phát lại stream link** (videos POST kind `link`): lúc tạo video, server
+   probe stream bằng Range GET *không* Referer; nếu bị 401/403/404 thì thử
+   lại với Referer = trang gốc — chỉ đường thứ hai chạy thì đặt
+   `needsProxy=true`. Route mới `GET /api/proxy-stream?u=&r=` (bắt buộc đăng
+   nhập) fetch upstream kèm Referer đó; gặp playlist m3u8 thì viết lại mọi
+   URL segment/key (kể cả URI="..." trong #EXT-X-KEY) qua chính proxy.
+   Trang xem: src m3u8 thì nạp hls.js từ CDN jsdelivr và attach, Safari có
+   HLS native thì dùng thẳng; video cần proxy thì phát qua /api/proxy-stream.
+
+### Bằng chứng test (server production :3100, tài khoản test riêng)
+- **(a) animevietsub.bid (link của user)**: fetch trang từ server bị chặn
+  (kết nối bị cắt / trang kiểm tra anti-bot), yt-dlp generic cũng 403
+  Cloudflare anti-bot. Kết quả trung thực: `candidates: []` + `engineNote`
+  nói rõ site chặn truy cập tự động, kèm lỗi gốc của yt-dlp và workaround
+  (dán link video/embed trực tiếp, hoặc tải file rồi upload). Trang chủ hiển
+  thị đúng engineNote này (đã kiểm tra chuỗi trong bundle + logic setErr).
+  KHÔNG tuyên bố link này chạy được.
+- **(b) Vimeo https://vimeo.com/76979871**: scan tĩnh chỉ có og:video embed
+  (60). yt-dlp trên URL trang bị Vimeo từ chối ("web client only works when
+  logged-in"), nhưng engine thử URL player.vimeo.com từ og:video → trích
+  được candidate kind `yt-dlp` score 80 kèm duration 62 + thumbnail; đã tạo
+  video thành công. Playlist của candidate tải về 200 NHƯNG chứa
+  `#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://drm"` — video này được bảo vệ
+  FairPlay DRM nên trình duyệt không phát được dù URL reachable. Đây là giới
+  hạn của chính video, không phải của extractor.
+- **(b′) archive.org/details/BigBuckBunny_124** (trang ngoài YouTube, kiểm
+  chứng phát được trọn vẹn): og:video mp4 score 90 + 2 candidate
+  `iframe-embed` từ iframe player của archive.org (nhánh iframe có bằng
+  chứng dương tính). Tạo video kind `link`, needsProxy=false, stream trả
+  206 Partial Content khi xin Range — phát + tua được.
+- **Engine yt-dlp độc lập**: detect trên youtube.com/watch?v=jNQXAC9IVRw cho
+  candidate kind `yt-dlp` (manifest HLS googlevideo, 80) — engine chạy trọn
+  pipeline ngoài luồng YouTube cứng.
+- **(c) m3u8 trực tiếp** (test-streams.mux.dev/x36xhzz): detect → `direct`
+  100; tạo video; playlist gốc 200; qua proxy: playlist được viết lại đúng
+  (mọi variant trỏ về /api/proxy-stream), tải 1 segment qua proxy → 200,
+  272.412 byte; proxy không có cookie → 401. Bundle trang xem chứa loader
+  hls.js@1 + logic proxy-stream.
+- **needsProxy dương tính** (server local giả lập CDN: 403 khi không
+  Referer, 200 khi có): tạo video → needsProxy=true, proxyReferer được lưu;
+  phát qua /api/proxy-stream kèm referer → 200 video/mp4. Ca âm tính (Mux,
+  archive.org) → needsProxy=false đúng.
+- **(d) hlsplayer.net**: trang không có og:video/<video>/<source> nào (v1 ra
+  0 candidate); v2 tìm được 3 candidate kind `script-url` score 55 (2 stream
+  Castr + 1 Bitmovin Sintel), ambiguous=true để user chọn — đúng thiết kế.
+  Trang MDN <video> cũng ra candidate từ text/script như kỳ vọng.
+- **(e) Regression**: tạo video YouTube dQw4w9WgXcQ → 61 câu captions như
+  cũ; sample → 4 câu; w3schools html5_video vẫn ra video-tag mp4/ogg;
+  `npm run build` PASS.
+
+### Ma trận hỗ trợ (trung thực)
+- YouTube: ✓ (luồng riêng lấy captions; detect cũng qua được bằng engine).
+- Site mà yt-dlp hỗ trợ (nghìn site): ✓ khi video không DRM/không bắt đăng
+  nhập — Vimeo qua ngả player-embed, Bilibili/Dailymotion tùy trạng thái
+  extractor + region (lúc test: Dailymotion trả metadata rỗng theo region,
+  Bilibili vướng cert của proxy chặn TLS ở tầng tải trang của extractor).
+- Link media trực tiếp (.mp4/.webm/.mov/.m3u8): ✓, gồm cả HLS qua hls.js.
+- Trang HTML tĩnh / config JS / iframe player tự host: ✓ theo scan v2.
+- Site streaming bị anti-bot wall (Cloudflare JS check kiểu animevietsub):
+  ✗ từ phía server — không đường vòng hợp lệ ở tầng server; workaround là
+  dán link video/embed trực tiếp lấy từ player, hoặc tải file về rồi upload.
+- Video DRM (FairPlay/Widevine, vd Vimeo title ở trên): URL trích được
+  nhưng ✗ không phát được trong trình duyệt nếu không có license server.

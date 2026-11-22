@@ -45,10 +45,14 @@ export async function POST(req, { params }){
   }
 
   const lang = body.language || v.sourceLang || 'auto';
+  // Model choice: an explicit per-request pick from the confirm page wins,
+  // then the server env, then 'base' (tiny proved too rough for real use).
+  const MODELS = ['tiny','base','small','medium'];
+  const model = MODELS.includes(body.model) ? body.model : (process.env.WHISPER_MODEL || 'base');
   let asr;
   try{
     const { stdout } = await run(py, [script,'--input',inputFile,'--language',String(lang)],
-      { timeout: 600000, maxBuffer: 64*1024*1024, env: pythonEnv({ WHISPER_MODEL: process.env.WHISPER_MODEL || 'tiny' }) });
+      { timeout: 600000, maxBuffer: 64*1024*1024, env: pythonEnv({ WHISPER_MODEL: model }) });
     const start = stdout.indexOf('{');
     asr = JSON.parse(stdout.slice(start));
   }catch(e){

@@ -8,6 +8,7 @@ export default function Confirm(){
   const [source,setSource] = useState(''); const [target,setTarget] = useState('vi');
   const [busy,setBusy] = useState(false); const [msg,setMsg] = useState('');
   const [asrBusy,setAsrBusy] = useState(false); const [asrErr,setAsrErr] = useState('');
+  const [model,setModel] = useState('base');
   async function load(){
     const r = await fetch(`/api/videos/${id}`); const j = await r.json();
     if(!r.ok) throw new Error(j.error);
@@ -21,7 +22,7 @@ export default function Confirm(){
   async function transcribe(){
     setAsrBusy(true); setAsrErr('');
     try{
-      const r = await fetch(`/api/videos/${id}/transcribe`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(source?{language:source}:{})});
+      const r = await fetch(`/api/videos/${id}/transcribe`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...(source?{language:source}:{}),model})});
       const j = await r.json();
       if(!r.ok) throw new Error(j.error||'transcription failed');
       await load(); // sentences, token estimate and language detection all refresh
@@ -47,7 +48,17 @@ export default function Confirm(){
         {v.thumb && <img src={v.thumb} alt="" style={{width:220,borderRadius:10,marginTop:8}}/>}</div>
       {v.sentences.length===0 && <div style={{background:'#08090A',border:'1px solid #26272B',borderRadius:10,padding:12,display:'grid',gap:10}}>
         <div style={{color:'#ffb59d',fontSize:13}}>⚠ No transcript found for this video yet — the site provided no captions or subtitles we could fetch. Whisper can listen to the video itself and write the transcript (with word-level timing for karaoke).</div>
-        <button className="btn" disabled={asrBusy} onClick={transcribe} style={{justifySelf:'start'}}>{asrBusy?'🎙️ Listening… transcribing now':'🎙️ Create transcript with Whisper (listens to the video)'}</button>
+        <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+          <button className="btn" disabled={asrBusy} onClick={transcribe}>{asrBusy?'🎙️ Listening… transcribing now':'🎙️ Create transcript with Whisper (listens to the video)'}</button>
+          <label className="small muted" style={{display:'flex',gap:6,alignItems:'center'}}>Model:
+            <select value={model} onChange={e=>setModel(e.target.value)} disabled={asrBusy}>
+              <option value="tiny">tiny — fastest, roughest (~75MB first-use download)</option>
+              <option value="base">base — balanced (default, ~140MB)</option>
+              <option value="small">small — more accurate, slower (~470MB)</option>
+              <option value="medium">medium — most accurate, slowest (~1.5GB)</option>
+            </select>
+          </label>
+        </div>
         {asrBusy && <div className="small muted" style={{display:'flex',alignItems:'center',gap:8}}><span className="spinner"></span> Transcription runs on the CPU — short clips take under a minute, long videos can take several minutes. Keep this page open.</div>}
         {asrErr && <div style={{color:'#ff8a70',fontSize:13}}>{asrErr}</div>}
         <div className="small muted">Or go back and paste a transcript manually instead.</div>

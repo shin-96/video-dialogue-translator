@@ -378,3 +378,66 @@ người dùng không có proxy env thì Chromium đi thẳng, không qua relay.
 - Độ trễ detect khi headless kích hoạt: ~35–90s (trần route 60s cho riêng
   stage này, cộng thời gian các stage trước); RAM ~200–400MB/phiên, mỗi
   lần detect tối đa 1 browser, đóng ngay sau khi xong.
+
+## Transcript & translation quality (2026-11-22, vòng sửa theo test thật: "lộn lấy văn bản gốc sai tùm lum" + "dịch sai tùm lum")
+
+### Đã thay đổi
+- **ASR:** `scripts/asr_words.py` dùng `beam_size=5` (trước: 1). Model mặc
+  định ở route transcribe + align đổi từ `tiny` → **`base`** (env
+  `WHISPER_MODEL` vẫn thắng khi được đặt). Route transcribe nhận thêm
+  `body.model` (chỉ chấp nhận `tiny|base|small|medium`, giá trị lạ thì rơi
+  về mặc định). Trang Confirm có thêm ô chọn model cạnh nút Whisper, ghi rõ
+  dung lượng tải lần đầu: tiny ~75MB, base ~140MB, small ~470MB, medium ~1.5GB.
+- **Dịch:** chuỗi engine mới trong `lib/translate.js`:
+  **Google Translate gtx** (`translate.googleapis.com/translate_a/single`,
+  không cần key; mã `zh` → `zh-CN`, các mã còn lại giữ nguyên) → MyMemory →
+  LibreTranslate. gtx lỗi/timeout/rỗng thì tự rơi xuống engine kế, không
+  báo lỗi cho người dùng. (Bước OpenRouter cũ đã gỡ khỏi chuỗi: chỉ chạy
+  khi có key và không còn nằm trong chuỗi ưu tiên mới.)
+
+### Benchmark ASR (bằng chứng thật)
+Video YouTube `hFZ1CsQulmw` （何同学， tiếng Trung phổ thông rõ ràng) — có
+**phụ đề zh-CN do người đăng tải lên (không phải auto-caption)**. Lấy 120
+giây đầu: phụ đề gốc làm ground truth (520 ký tự sau khi bỏ dấu câu/khoảng
+trắng), chạy `asr_words.py` từng model (beam 5), tính CER (khoảng cách
+chỉnh sửa / số ký tự gốc) và độ tương đồng difflib:
+
+| Model | CER ↓ | Tương đồng ↑ | Thời gian (120s audio, VM này) |
+|---|---|---|---|
+| tiny | 0.302 | 0.670 | 14.6s |
+| base (mặc định mới) | 0.198 | 0.811 | 22.5s |
+| small | 0.102 | 0.900 | 56.4s |
+
+Ví dụ lỗi điển hình của tiny mà small sửa được: 垃圾桶 → "垃圾头",
+桌子上 → "猪子上的", 狂奔的 → mất hẳn. base vẫn còn lỗi đồng âm
+（不倒 → 不到）. Kết luận: small giảm ~2/3 lỗi so với tiny; base là mặc
+định cân bằng, người dùng cần chính xác hơn thì tự chọn small/medium ở
+trang Confirm.
+
+### Kiểm chứng dịch (5 câu trong ảnh chụp của user, zh→vi)
+| Câu gốc | MyMemory (cũ) | Chuỗi mới (gtx) |
+|---|---|---|
+| 然后突然推出了一本爱情合集。 | rồi bất ngờ tung ra một tòn tập tình thường rã | Rồi đột nhiên một bộ sưu tập tình yêu xuất hiện. |
+| 胆小的狗怕扒掉垫子。 | Chó mức hoàn sợ tháo trải | Chó nhút nhát sợ làm rách thảm. |
+| 粘上跛脚猫有时让蝙蝠失去做脚猫的对手 | Dính chú mèo tay quầy đôi khi sẽ làm dơi mất đôi tay quẩy cụy ra | Gắn mèo què đôi khi khiến dơi mất đối thủ vào tay mèo què |
+| 对于去球场的人。 | đối với kẻ đi săn | Dành cho những người đi đến sân bóng chày. |
+| 只需一次成功的练习 | Chỉ cần một lần tập tích thành công | Chỉ cần một lần thực hành thành công |
+
+### Regression end-to-end (server production)
+- `npm run build` PASS; ô chọn model xuất hiện trong bundle trang Confirm.
+- Tạo sample → dịch en→vi qua chuỗi mới: 4/4 câu, 0 lỗi.
+- Upload file ghi âm tiếng Trung thật (120s) → transcribe với
+  `{"model":"base"}` qua API: trả 73 câu, 450 từ có timestamp, ~24s.
+
+### Giới hạn thành thật
+- ASR vẫn không hoàn hảo: nội dung lóng/vô nghĩa kiểu mockumentary (chính
+  câu gốc trong ảnh của user — "做脚猫" — nhiều khả năng bản thân nó đã là
+  Whisper nghe sai từ video trước), audio nhiễu/nhạc nền, nói nhanh chồng
+  tiếng đều làm CER tăng mạnh so với con số benchmark trên tiếng phổ
+  thông sạch. Model lớn hơn chỉ giảm lỗi, không xóa hết.
+- gtx là endpoint miễn phí **không chính thức**: có thể bị rate-limit hoặc
+  thay đổi bất cứ lúc nào; khi đó chuỗi tự rơi về MyMemory/LibreTranslate
+  (chất lượng thấp hơn thấy rõ) mà không có cảnh báo riêng.
+- beam_size=5 + model lớn hơn = chậm hơn trên CPU: small tốn ~2.5× thời
+  gian của base cho cùng audio trên VM này; medium chưa benchmark (tải
+  ~1.5GB, dự kiến chậm hơn nữa).

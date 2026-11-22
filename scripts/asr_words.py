@@ -73,7 +73,7 @@ def main():
         audio,
         language=lang,
         word_timestamps=True,
-        beam_size=1,
+        beam_size=5,
         vad_filter=False,
     )
 

@@ -56,7 +56,7 @@ export async function POST(req, { params }){
   let asr;
   try{
     const { stdout } = await run(py, [script,'--input',inputFile,'--language',String(lang)],
-      { timeout: 600000, maxBuffer: 64*1024*1024, env: pythonEnv({ WHISPER_MODEL: process.env.WHISPER_MODEL || 'tiny' }) });
+      { timeout: 600000, maxBuffer: 64*1024*1024, env: pythonEnv({ WHISPER_MODEL: process.env.WHISPER_MODEL || 'base' }) });
     const start = stdout.indexOf('{');
     asr = JSON.parse(stdout.slice(start));
   }catch(e){

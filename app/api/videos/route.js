@@ -1,7 +1,7 @@
 import { requireUser } from '@/lib/api';
 import { readDB, mutate, uid } from '@/lib/store';
 import { SAMPLE } from '@/lib/sample';
-import { splitSentences } from '@/lib/text';
+import { splitSentences, mergeSegmentsToSentences } from '@/lib/text';
 import { fetchSiteSubtitles } from '@/lib/vtt';
 
 // Creation of a link video may spend up to ~90s trying to fetch the site's
@@ -51,16 +51,33 @@ export async function POST(req){
     const idm = String(body.url||'').match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)([\w-]{6,})/);
     if(!idm) return Response.json({ error:'not a valid YouTube link' }, { status:400 });
     const ytId = idm[1];
-    let sentences = [], source = 'none';
+    let sentences = [], source = 'none', timed = false;
     try{
       const { YoutubeTranscript } = await import('youtube-transcript');
       const items = await YoutubeTranscript.fetchTranscript(ytId);
       if(items?.length){
-        sentences = items.map(it=>({ text: it.text.replace(/&amp;/g,'&').replace(/&#39;/g,"'"), start: it.offset/1000, end: (it.offset + it.duration)/1000 }));
-        source = 'YouTube captions';
+        const clean = (txt)=> String(txt || '').replace(/&amp;/g,'&').replace(/&#39;/g,"'").replace(/&quot;/g,'"');
+        const raw = items.filter(it=>clean(it.text).trim());
+        // Timed path: the captions API gives every segment an offset and a
+        // duration — keep them. Segments are merged into real sentences
+        // whose words inherit the segment spans, so a caption-sourced
+        // video has REAL timings for phrase sync instead of word-less
+        // fragments that only Whisper Align could rescue.
+        if(raw.length && raw.every(it=>Number.isFinite(it.offset) && Number.isFinite(it.duration))){
+          const segments = raw.map(it=>({ text: clean(it.text), start: it.offset/1000, end: (it.offset + it.duration)/1000 }));
+          const merged = mergeSegmentsToSentences(segments);
+          if(merged.length){ sentences = merged; source = 'YouTube captions'; timed = true; }
+        }
+        if(!sentences.length){
+          // Plain fallback: a transcript source with no usable timing info
+          // keeps the legacy per-segment sentences (no words, no timing
+          // source) exactly as before.
+          sentences = items.map(it=>({ text: clean(it.text), start: it.offset/1000, end: (it.offset + it.duration)/1000 }));
+          source = 'YouTube captions';
+        }
       }
     }catch{ /* no captions available */ }
-    Object.assign(base, { title: body.title || `YouTube ${ytId}`, kind:'youtube', ytId, src: body.url, thumb:`https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`, duration: sentences.length? sentences[sentences.length-1].end : 0, sentences, transcriptSource: source });
+    Object.assign(base, { title: body.title || `YouTube ${ytId}`, kind:'youtube', ytId, src: body.url, thumb:`https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`, duration: sentences.length? sentences[sentences.length-1].end : 0, sentences, transcriptSource: source, ...(timed ? { timingSource: 'captions' } : {}) });
   } else if(body.kind === 'link' || body.kind === 'generic' || body.kind === 'upload'){
     const isLink = body.kind !== 'upload';
     const storedKind = body.kind === 'upload' ? 'upload' : 'link';
@@ -86,6 +103,8 @@ export async function POST(req){
       if(subs?.sentences?.length){
         base.sentences = subs.sentences;
         base.transcriptSource = 'site subtitles (yt-dlp)';
+        // Parsed VTT sentences carry caption-derived word timings.
+        if(subs.sentences.some(s=>Array.isArray(s.words) && s.words.length)) base.timingSource = 'captions';
         base.subLang = subs.lang || null;
         const lastEnd = subs.sentences[subs.sentences.length-1].end;
         if(lastEnd > (base.duration || 0)) base.duration = lastEnd;

@@ -25,7 +25,8 @@ export default function Watch(){
   const followPausedRef = useRef(false);
   const setPaused = (p)=>{ followPausedRef.current = p; setFollowPaused(p); };
 
-  // A sentence "has words" only when Whisper gave it REAL word timings.
+  // A sentence "has words" only when it carries REAL word timings — from
+  // Whisper, or derived from the video's own captions at ingestion.
   const hasRealWords = (s)=> Array.isArray(s.words) && s.words.length > 0;
   // twords are valid only while they still line up 1:1 with the current
   // translation's tokens (same staleness guard as lib/text.js).
@@ -270,7 +271,7 @@ export default function Watch(){
 
   return (<div>
     <h1 style={{fontSize:22,letterSpacing:'-.02em',margin:'4px 0 4px'}}>{v.title}</h1>
-    <p className="small muted">{v.kind} · {v.translated? `translated → ${v.target}` : 'not translated yet'} {v.partialCount && v.partialCount < v.sentences.length ? `· partial: first ${v.partialCount} sentences` : ''} · timing: {v.timingSource==='whisper' ? 'Whisper (real voice)' : 'estimated'}{v.translated ? (trSyncedCount > 0 ? ` · translation timing: phrase-align (${trSyncedCount}/${trSentences.length})` : ` · translation timing: estimated${anyRealWords ? '' : ' (no voice timings)'}`) : ''} {!v.translated && <a href={`/confirm/${id}`} style={{color:'#FF4D00',fontWeight:600}}>Translate →</a>}</p>
+    <p className="small muted">{v.kind} · {v.translated? `translated → ${v.target}` : 'not translated yet'} {v.partialCount && v.partialCount < v.sentences.length ? `· partial: first ${v.partialCount} sentences` : ''} · timing: {v.timingSource==='whisper' ? 'Whisper (real voice)' : v.timingSource==='captions' ? 'Captions (real timing)' : 'estimated'}{v.translated ? (trSyncedCount > 0 ? ` · translation timing: phrase-align (${trSyncedCount}/${trSentences.length})` : ` · translation timing: estimated${anyRealWords ? '' : ' (no voice timings)'}`) : ''} {!v.translated && <a href={`/confirm/${id}`} style={{color:'#FF4D00',fontWeight:600}}>Translate →</a>}</p>
     {showNoWordsNotice && <div className="small" style={{color:'#ffb37e',marginTop:6,lineHeight:1.5}}>⚠ This video has no real voice timings yet, so the translation can't be phrase-synced. Run Align (Whisper) first, then Sync.</div>}
     <div style={{display:'grid',gridTemplateColumns:'minmax(0,1.15fr) minmax(0,.85fr)',gap:0,border:'1px solid #1F2023',borderRadius:14,overflow:'hidden',marginTop:12}}>
       <div style={{padding:14,borderRight:'1px solid #1F2023',background:'#0B0C0E'}}>
@@ -300,6 +301,7 @@ export default function Watch(){
             {aligning ? 'Aligning…' : '🎯 Align timing to voice (Whisper)'}
           </button>
           {v.timingSource==='whisper' && <span className="small" style={{color:'#7ee2a0'}}>Word timings are synced to the real voice.</span>}
+          {v.timingSource==='captions' && <span className="small" style={{color:'#7ee2a0'}}>Word timings come from the video's own captions.</span>}
         </div>
         {v.translated && <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:10,alignItems:'center'}}>
           <button className="btn-ghost" style={{padding:'8px 13px',fontSize:12}} onClick={syncTranslationTiming} disabled={syncing}>

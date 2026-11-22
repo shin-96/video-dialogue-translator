@@ -577,3 +577,98 @@ Giới hạn còn lại: chunk lạnh (lần sync đầu của video dài, cache
 vẫn tốn thời gian theo số cụm nhiều-cụm và tốc độ engine miễn phí —
 nhưng nay nó *tiến triển từng chunk và sống sót qua lỗi mạng*, không
 còn chết toàn cục như trước.
+
+## Caption-derived timings (2026-11-22, vòng sửa theo phản hồi: "thật sự là đã tải video mới, và dịch vẫn lệch" — kèm ảnh tập Gumball *The Bros* trên YouTube)
+
+### Chuỗi lỗi
+
+Video YouTube của user ("FULL EPISODE: The Bros", id `bUGudiyGMI4`) lấy
+lời thoại từ **captions của YouTube**. Lúc ingestion, các segment caption
+bị *làm phẳng thành text thuần*: mỗi segment thành một "câu" không có
+`words`, và segment vốn đã cắt giữa chừng câu nói — ảnh của user cho
+thấy hai "câu" liên tiếp là "…enough space in" và "my for the both of
+you." (một câu bị xẻ đôi). Không có `words` → phrase sync không có gì để
+sync → nút Sync phải chạy vòng qua Whisper Align → Align cần tải audio
+bằng yt-dlp → yt-dlp chết với video này ("This video is not available",
+kèm cảnh báo thiếu JS runtime) → sync thất bại, bản dịch giữ timing ước
+lượng và lệch hẳn khỏi giọng. Gốc rễ: **timing thật vốn đã có sẵn trong
+captions** (API trả offset + duration cho từng segment) nhưng ingestion
+đã vứt nó đi.
+
+### Cách sửa — lấy timing từ chính captions
+
+- **`lib/text.js` — 2 helper mới.** `segmentWordTimings(text, start,
+  end)`: tokenize text của một segment theo khoảng trắng, phân bổ khoảng
+  `[start, end]` cho từng token theo tỉ lệ độ dài ký tự → `words`.
+  `mergeSegmentsToSentences(segments)`: gộp các segment thành CÂU thật —
+  tích lũy cho tới khi text kết thúc bằng dấu kết câu (`. ! ? … 。 ！ ？`,
+  bỏ qua dấu ngoặc/quote ở cuối), ngắt bắt buộc khi khoảng lặng giữa hai
+  segment > 1.5s hoặc text tích lũy > ~220 ký tự. Câu có `text` = các
+  segment nối bằng 1 khoảng trắng, `start`/`end` = mốc của từ đầu/cuối,
+  `words` = toàn bộ từ đã nối (được kẹp đơn điệu để segment chồng nhau
+  không sinh timing ngược).
+- **Áp dụng cho cả 2 nguồn caption.** (1) YouTube (`app/api/videos/
+  route.js`): `fetchTranscript` items mang offset/duration → segments →
+  merge. Nếu nguồn transcript không cho timing dùng được, giữ nguyên
+  đường cũ (segment phẳng, không `words`) làm fallback. (2) VTT
+  (`lib/vtt.js`): `parseVttToSentences` sau khi khử trùng lặp rolling
+  caption thì merge bằng cùng helper — video link lấy phụ đề site qua
+  yt-dlp cũng có `words` từ nay.
+- **`video.timingSource = 'captions'`** cho cả 2 đường trên (Whisper giữ
+  `'whisper'`; đường không timing giữ `'estimated'` như cũ). Header
+  trang Watch phân biệt 3 nguồn: `Whisper (real voice)` / `Captions
+  (real timing)` / `estimated`. Notice "no real voice timings" và nút
+  Sync thông minh vốn đã key theo sự hiện diện của `s.words` nên tự
+  đúng với caption words — không đổi ngữ nghĩa.
+- **yt-dlp hardening.** `ytDlpBaseArgs` (`lib/venv.js`) thêm
+  `--js-runtimes node` (server là Node nên node luôn có trên PATH của
+  tiến trình con) — xoá lớp lỗi "YouTube extraction without a JS runtime
+  has been deprecated" và mất format. Đã kiểm chứng yt-dlp 2026.10.26
+  trong venv chấp nhận flag, và fetch phụ đề site chạy qua bộ args này
+  thành công.
+- Translate và align-translation **không đổi code** — chúng chạy thẳng
+  trên caption words (kiểm chứng bên dưới).
+
+### Bằng chứng test (server production :3100, tài khoản test riêng)
+
+Lưu ý minh bạch: từ VM này, captions của chính `bUGudiyGMI4` **không
+fetch được** (youtube-transcript báo "Transcript is disabled" — bot
+wall theo vùng; trên máy user captions của video này lấy được bình
+thường, ảnh chụp đã chứng minh). Tạo video qua API từ VM cho kết quả
+`sentenceCount 0, transcriptSource none` đúng như dự đoán, nên bộ test
+đầy đủ chạy trên video fallback `dQw4w9WgXcQ` theo đúng phương án dự
+phòng đã thống nhất:
+
+| Ca | Kết quả |
+|---|---|
+| Unit — merge/VTT (12 checks) | PASS tất cả: ca xẻ câu của user ("…enough space in" + "my for the both of you.") gộp thành 1 câu 14 từ; ngắt theo khoảng lặng > 1.5s; ngắt theo > 220 ký tự; chồng segment vẫn đơn điệu; dấu kết câu sau dấu ngoặc kép vẫn ngắt; VTT rolling captions khử trùng + gộp + có `words` |
+| Tạo video YouTube (fallback) | 61 segment caption thô → **10 câu** (gộp thật); `timingSource: 'captions'`; **100%** câu có `words`, 10/10 đơn điệu, 10/10 nằm gọn trong `[start, end]` và khớp đúng biên câu |
+| Dịch en→vi (KHÔNG gọi Align) | 10/10 câu, 0 lỗi — và twords đã được tính ngay trong lúc dịch: `translationTimingSource: 'phrase-align'`, 10/10 câu có twords hợp lệ |
+| align-translation | `aligned 10` = đúng số câu đã dịch có `words`; `skippedNoWords 0` |
+| Đo in-span (cùng phương pháp các vòng trước) | **100%** trong khoảng cụm (658 từ dịch; mục tiêu ≥98%) — cơ chế quét đều cũ chỉ đạt 85.9% trên cùng dữ liệu, lệch trung vị 5.03s ở câu nhiều cụm |
+| Đường VTT/site subtitles | tạo video link cùng URL qua yt-dlp: 10 câu, 10/10 có `words`, `timingSource: 'captions'` |
+| Regression — sample | không `words`, không `timingSource`, dịch 4/4, không twords → fallback tỉ lệ như cũ |
+| Regression — upload + Whisper | clip Gumball 60s, transcribe base: 11 câu/174 từ, `timingSource: 'whisper'` nguyên vẹn |
+
+Về các câu mẫu của video fallback: captions của nó là *lời bài hát
+không dấu câu*, nên 10 câu đều kết thúc không dấu kết (ngắt bằng luật
+220 ký tự/khoảng lặng) — đó là tính chất của nguồn, không phải lỗi gộp;
+gộp theo dấu câu đã được kiểm chứng ở unit test bằng chính các dòng
+trong ảnh của user.
+
+### Giới hạn thành thật
+
+- **Timing của captions là ở mức segment, không phải mức từ.** Trong
+  một segment, thời gian của từng từ được chia theo độ dài ký tự — thô
+  hơn word timestamps thật của Whisper, nhưng khoảng thời gian là THẬT
+  (từ track caption) và đủ cho phrase sync khớp theo cụm. Whisper Align
+  vẫn là bản nâng cấp độ chính xác khi audio tải xuống được.
+- **Video tạo TRƯỚC thay đổi này giữ nguyên các câu cũ không có
+  `words`** — kể cả video *The Bros* đang nằm trong thư viện của user.
+  Muốn có caption timings phải **thêm lại video đó** (hoặc chạy lại
+  nguồn transcript của nó); không có đường tự vá cho record cũ vì
+  timing gốc đã bị vứt ở ingestion và không còn lưu ở đâu.
+- Fetch captions vẫn phụ thuộc mạng/vùng: VM này bị YouTube chặn với
+  `bUGudiyGMI4` trong khi máy user lấy được — bản sửa không (và không
+  thể) thay đổi điều đó; nó chỉ đảm bảo *khi captions lấy được* thì
+  timing không bị vứt đi nữa.

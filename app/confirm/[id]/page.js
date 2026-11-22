@@ -7,10 +7,27 @@ export default function Confirm(){
   const [data,setData] = useState(null); const [err,setErr] = useState('');
   const [source,setSource] = useState(''); const [target,setTarget] = useState('vi');
   const [busy,setBusy] = useState(false); const [msg,setMsg] = useState('');
-  useEffect(()=>{ fetch(`/api/videos/${id}`).then(async r=>{ const j=await r.json(); if(!r.ok) throw new Error(j.error); setData(j);
+  const [asrBusy,setAsrBusy] = useState(false); const [asrErr,setAsrErr] = useState('');
+  async function load(){
+    const r = await fetch(`/api/videos/${id}`); const j = await r.json();
+    if(!r.ok) throw new Error(j.error);
+    setData(j);
     if(j.detection?.[0]) setSource(j.detection[0].code);
+    return j;
+  }
+  useEffect(()=>{ load().then(()=>{
     fetch('/api/auth').then(r=>r.json()).then(m=>{ if(m.user?.defaultTarget) setTarget(m.user.defaultTarget); }).catch(()=>{});
   }).catch(e=>setErr(e.message)); },[id]);
+  async function transcribe(){
+    setAsrBusy(true); setAsrErr('');
+    try{
+      const r = await fetch(`/api/videos/${id}/transcribe`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(source?{language:source}:{})});
+      const j = await r.json();
+      if(!r.ok) throw new Error(j.error||'transcription failed');
+      await load(); // sentences, token estimate and language detection all refresh
+    }catch(e){ setAsrErr(e.message); }
+    setAsrBusy(false);
+  }
   if(err) return <p style={{color:'#ff8a70'}}>{err}</p>;
   if(!data) return <p className="muted">Loading…</p>;
   const v = data.video;
@@ -28,7 +45,13 @@ export default function Confirm(){
     <div className="card" style={{marginTop:14,display:'grid',gap:12}}>
       <div><b>{v.title}</b><div className="small muted">{v.kind} · transcript: {v.transcriptSource} · {v.sentences.length} sentences</div>
         {v.thumb && <img src={v.thumb} alt="" style={{width:220,borderRadius:10,marginTop:8}}/>}</div>
-      {v.sentences.length===0 && <div style={{color:'#ffb59d',fontSize:13}}>⚠ No transcript found for this video. ASR is not configured in this MVP — go back and paste a transcript manually, or use a captioned YouTube video / the sample.</div>}
+      {v.sentences.length===0 && <div style={{background:'#08090A',border:'1px solid #26272B',borderRadius:10,padding:12,display:'grid',gap:10}}>
+        <div style={{color:'#ffb59d',fontSize:13}}>⚠ No transcript found for this video yet — the site provided no captions or subtitles we could fetch. Whisper can listen to the video itself and write the transcript (with word-level timing for karaoke).</div>
+        <button className="btn" disabled={asrBusy} onClick={transcribe} style={{justifySelf:'start'}}>{asrBusy?'🎙️ Listening… transcribing now':'🎙️ Create transcript with Whisper (listens to the video)'}</button>
+        {asrBusy && <div className="small muted" style={{display:'flex',alignItems:'center',gap:8}}><span className="spinner"></span> Transcription runs on the CPU — short clips take under a minute, long videos can take several minutes. Keep this page open.</div>}
+        {asrErr && <div style={{color:'#ff8a70',fontSize:13}}>{asrErr}</div>}
+        <div className="small muted">Or go back and paste a transcript manually instead.</div>
+      </div>}
       <div>
         <div className="small muted" style={{marginBottom:6}}>Detected language(s) in the transcript — confirm the source language:</div>
         {data.detection.length===0 && <span className="small">Could not detect (no transcript?)</span>}

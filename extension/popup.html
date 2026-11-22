@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VDT Companion</title>
+<style>
+  :root{ color-scheme: dark; }
+  *{ box-sizing:border-box; }
+  body{ width:392px; margin:0; padding:14px; background:#0B0C0E; color:#EDEDEF;
+        font:13px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif; }
+  h1{ font-size:14px; margin:0 0 2px; letter-spacing:-.01em; }
+  .sub{ color:#8A8F98; font-size:12px; margin-bottom:10px; word-break:break-all; }
+  .row{ display:flex; gap:8px; align-items:center; }
+  .cand{ display:flex; gap:8px; align-items:center; background:#141519; border:1px solid #26272B;
+         border-radius:10px; padding:8px 10px; margin-bottom:8px; }
+  .badge{ flex:none; font-size:10px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+          background:#26272B; color:#FFB59D; border-radius:99px; padding:2px 8px; }
+  .url{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+        font-family:ui-monospace,monospace; font-size:11.5px; color:#C9CCD1; }
+  .score{ flex:none; color:#8A8F98; font-size:11px; }
+  button{ cursor:pointer; border-radius:999px; border:1px solid #26272B; background:#1C1D21;
+          color:#EDEDEF; padding:6px 12px; font-size:12px; }
+  button.primary{ background:#FF4D00; border-color:#FF4D00; color:#fff; font-weight:600; }
+  button:disabled{ opacity:.55; cursor:default; }
+  .hint{ background:#141519; border:1px dashed #33343A; border-radius:10px; padding:10px 12px; color:#C9CCD1; }
+  .err{ color:#FF8A70; margin-top:8px; word-break:break-word; }
+  .ok{ color:#7EE2A0; margin-top:8px; }
+  .ok a{ color:#7EE2A0; font-weight:700; }
+  details{ margin-top:12px; border-top:1px solid #1F2023; padding-top:10px; }
+  summary{ cursor:pointer; color:#8A8F98; font-size:12px; }
+  label{ display:block; color:#8A8F98; font-size:11px; margin:8px 0 4px; }
+  input{ width:100%; background:#0B0C0E; border:1px solid #26272B; border-radius:8px;
+         color:#EDEDEF; padding:7px 9px; font-size:12px; }
+  .status{ color:#8A8F98; font-size:12px; margin:8px 0; }
+</style>
+</head>
+<body>
+  <h1>Send video to Dialogue Translator</h1>
+  <div class="sub" id="pageInfo">Scanning this page…</div>
+  <div id="list"></div>
+  <div id="feedback"></div>
+  <details>
+    <summary>Settings — App URL &amp; import token</summary>
+    <label for="appUrl">App URL</label>
+    <input id="appUrl" type="text" placeholder="http://localhost:3000" spellcheck="false">
+    <label for="token">Import token (from the app: Settings → Browser companion)</label>
+    <input id="token" type="text" placeholder="paste token…" spellcheck="false">
+    <div class="row" style="margin-top:10px">
+      <button id="saveSettings" class="primary">Save settings</button>
+      <span class="status" id="settingsMsg"></span>
+    </div>
+  </details>
+  <script src="popup.js"></script>
+</body>
+</html>

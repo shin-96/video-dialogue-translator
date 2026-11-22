@@ -2,6 +2,11 @@ import { requireUser } from '@/lib/api';
 import { readDB, mutate, uid } from '@/lib/store';
 import { SAMPLE } from '@/lib/sample';
 import { splitSentences } from '@/lib/text';
+import { fetchSiteSubtitles } from '@/lib/vtt';
+
+// Creation of a link video may spend up to ~90s trying to fetch the site's
+// own subtitles (best-effort bonus) — allow the route enough time.
+export const maxDuration = 180;
 
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 // Probe a remote stream the way a bare <video> tag would (no Referer). Some
@@ -59,7 +64,7 @@ export async function POST(req){
   } else if(body.kind === 'link' || body.kind === 'generic' || body.kind === 'upload'){
     const isLink = body.kind !== 'upload';
     const storedKind = body.kind === 'upload' ? 'upload' : 'link';
-    Object.assign(base, { title: body.title || 'Video', kind: storedKind, src: body.src, thumb: body.thumb||null, duration: body.duration || 0, sentences: [], transcriptSource:'none', needsProxy: false, proxyReferer: null });
+    Object.assign(base, { title: body.title || 'Video', kind: storedKind, src: body.src, thumb: body.thumb||null, duration: body.duration || 0, sentences: [], transcriptSource:'none', needsProxy: false, proxyReferer: null, pageUrl: isLink ? (body.pageUrl || null) : null });
     if(isLink && /^https?:\/\//i.test(body.src || '')){
       const pageRef = body.pageUrl || (()=>{ try{ return new URL(body.src).origin + '/'; }catch{ return null; } })();
       const probe = await probeStream(body.src, pageRef);
@@ -71,6 +76,20 @@ export async function POST(req){
       const per = 5;
       base.sentences = texts.map((t,i)=>({ text:t, start:i*per, end:(i+1)*per }));
       base.duration = texts.length*per; base.transcriptSource = 'manual paste';
+    }
+    // No transcript yet on a web-link video: try the SITE's own subtitles via
+    // yt-dlp before falling back to "none" (the confirm page can still run
+    // Whisper). Best-effort inside a ~90s budget — any failure just leaves
+    // transcriptSource 'none', creation is never blocked by it.
+    if(isLink && !base.sentences.length){
+      const subs = await fetchSiteSubtitles([body.pageUrl, body.src], process.cwd()).catch(()=>null);
+      if(subs?.sentences?.length){
+        base.sentences = subs.sentences;
+        base.transcriptSource = 'site subtitles (yt-dlp)';
+        base.subLang = subs.lang || null;
+        const lastEnd = subs.sentences[subs.sentences.length-1].end;
+        if(lastEnd > (base.duration || 0)) base.duration = lastEnd;
+      }
     }
   } else return Response.json({ error:'unknown kind' }, { status:400 });
   mutate(d=>{ d.videos.push(base); });

@@ -217,3 +217,79 @@ trang nào player nạp bằng JS, hoặc bị anti-bot, đều trả "No video 
   dán link video/embed trực tiếp lấy từ player, hoặc tải file về rồi upload.
 - Video DRM (FairPlay/Widevine, vd Vimeo title ở trên): URL trích được
   nhưng ✗ không phát được trong trình duyệt nếu không có license server.
+
+## ASR for every video (2026-11-22, vòng sửa theo phản hồi: "web mà cái gì cũng hạn chế thì người dùng dùng cái gì")
+
+Vấn đề: video tạo từ link web (kind link/generic) luôn có `sentences: []` —
+creation không hề thử lấy phụ đề của site, route Whisper (align) chỉ nhận
+sample/upload/YouTube nên video link bấm vào là lỗi, và trang confirm kết
+thúc bằng cảnh báo chết "ASR is not configured in this MVP". Mở khóa theo 3 lớp:
+
+### Đã làm
+- **Lưu `pageUrl`** trên record video link (trước đây chỉ dùng để probe
+  proxy rồi bỏ). Mọi bước sau đều dựa vào URL trang gốc này.
+- **Lớp 1 — phụ đề của chính site, lấy ngay lúc tạo video** (`lib/vtt.js`):
+  yt-dlp của venv (`--write-subs --write-auto-subs --sub-langs all
+  --sub-format vtt --skip-download`, ngân sách chung ~90s, không bao giờ
+  chặn việc tạo video khi lỗi) → parse VTT (parser mới: xử lý cả 2 dạng
+  timestamp, gỡ rolling-caption trùng lặp của auto-subs) → `sentences` +
+  `transcriptSource: 'site subtitles (yt-dlp)'` + `subLang` từ tên file.
+  Bài học thật: yt-dlp thoát mã lỗi (YouTube rate-limit 429 các track dịch
+  tự động) SAU KHI các track thật đã tải xong — code phải quét thư mục lấy
+  file đã tải thay vì tin mã thoát (đã sửa sau ca test đầu trả 'none' oan).
+- **Lớp 2 — nút Whisper trên trang confirm**: video 0 câu không còn là
+  đường chết — hiện panel với nút chính "🎙️ Create transcript with Whisper
+  (listens to the video)" → `POST /api/videos/[id]/transcribe` (mới, auth +
+  đúng chủ, timeout 600s): thay toàn bộ sentences bằng segment Whisper KÈM
+  timing từng từ, `transcriptSource: 'whisper-asr'`, `timingSource:
+  'whisper'`, lưu ngôn ngữ Whisper nghe được; không có tiếng nói → 422 và
+  giữ nguyên dữ liệu cũ. Xong thì confirm tự nạp lại (số câu, ước tính
+  token, nhận diện ngôn ngữ đều tươi mới). Câu báo lỗi cũ trong translate
+  route + text ở trang chủ đã trỏ về nút này.
+- **Giải audio dùng chung** (`lib/asrAudio.js`, align route đã refactor
+  sang dùng chung, giữ nguyên hành vi cũ): sample → file local; upload →
+  data/uploads; YouTube → yt-dlp tải audio; **link → 3 tầng**: (1) yt-dlp
+  tải audio từ pageUrl; (2) nếu CDN từ chối yt-dlp: yt-dlp chỉ liệt kê
+  format (-j) rồi tự kéo format audio tốt nhất bằng **ranged GET** (chỉ
+  Referer + User-Agent như player thật); (3) ffmpeg kéo thẳng stream kèm
+  Referer. Tầng 2 sinh ra từ bằng chứng thật: CDN bilivideo 403 với MỌI
+  full-GET và với header kiểu trình duyệt của yt-dlp, nhưng trả 206 cho
+  byte-range — curl/Node fetch kéo đủ 2.577.920 byte, ffprobe đọc được
+  178,19s audio.
+
+### Bằng chứng test (server production :3100, tài khoản test riêng)
+- **Bilibili đầu-cuối** — BV1aRy4zxEMQ 【新闻联播】李梓萌9月收稿～ (178s,
+  giọng phát thanh viên tiếng Trung): detect → candidate og:video (player
+  embed); tạo link (pageUrl được lưu) → `transcriptSource 'none'`, 0 câu
+  (đúng trạng thái người dùng gặp); bấm transcribe → **{ok, language 'zh',
+  33 câu, 216 từ có timing}** trong ~38s (kéo audio tầng 2 + Whisper);
+  nhận diện ngôn ngữ zh 100%; dịch zh→vi: **33/33 câu, 0 lỗi**, trừ 437
+  token. Mẫu câu đầu: "今天的新闻联播播送完了" → "Bản tin thời sự hôm nay
+  đã kết thúc."
+- **Phụ đề site lúc tạo (lớp 1)**: tạo video YouTube dQw4w9WgXcQ qua luồng
+  LINK → **60 câu, `transcriptSource 'site subtitles (yt-dlp)'`, subLang
+  'en'**, parse sạch (dòng nhạc có timing chuẩn). Với Bilibili: đã probe
+  6 video khác nhau (tin tức, TED re-up, song ngữ) — yt-dlp không đăng
+  nhập chỉ thấy track `danmaku` (bình luận chạy chữ, KHÔNG phải phụ đề,
+  code lọc đúng không nhận nhầm), không video nào có track phụ đề thật →
+  trên Bilibili lớp 1 không bắt được gì và lớp Whisper là đường thắng.
+- **Regression**: sample → 4 câu built-in; YouTube (kind youtube) → 61 câu
+  captions; align trên file upload (mp4 giọng nói tiếng Trung tự dựng) →
+  ok, 38 câu Whisper được adopt, 258 từ; transcribe lên video sample (chỉ
+  tiếng tone) → 422 trung thực, dữ liệu cũ nguyên vẹn; transcribe không
+  đăng nhập → 401; `npm run build` PASS (route transcribe có trong build).
+
+### Giới hạn thành thật
+- **Tốc độ CPU**: Whisper tiny trên CPU — 178s audio mất ~38s cả kéo +
+  nghe ở máy test; video dài hàng giờ sẽ mất hàng chục phút (timeout route
+  600s cho mỗi lần gọi; chưa có hàng đợi nền).
+- **Độ chính xác của model tiny**: nghe đúng tiếng nhưng sai chữ lẻ
+  (vd "白露"→"白路", "节气"→"节绩"); muốn chữ chuẩn hơn đặt
+  `WHISPER_MODEL=base` (chậm hơn). Dịch vẫn đúng ý ở mức câu.
+- **Phụ đề site tùy nền tảng/người đăng**: có video mới có; Bilibili không
+  đăng nhập thì yt-dlp không thấy track phụ đề nào (cần cookie đăng nhập
+  mới khác — chưa làm). Chất lượng dịch phụ thuộc nhà cung cấp free
+  (MyMemory đôi lúc dịch cụt một từ đứng lẻ, vd "再见" đứng một mình).
+- Phát lại video Bilibili trong trang xem vẫn là candidate trang player
+  embed (Bilibili chỉ cấp DASH tách hình/tiếng, không có file gộp) — vòng
+  này mở khóa PHẦN LỜI THOẠI/dịch/học, không thay đổi bản chất stream đó.

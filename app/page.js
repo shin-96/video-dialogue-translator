@@ -112,7 +112,7 @@ export default function Home(){
     <div style={{maxWidth:640,margin:'22px auto 0'}}>
       <details className="card">
         <summary style={{cursor:'pointer',fontWeight:600,fontSize:14}}>No captions? Paste a transcript manually</summary>
-        <p className="small muted">ASR (automatic speech recognition) is not configured in this MVP, so videos without captions need a transcript pasted here before you fetch/upload. It will be split into sentences (5s each) for karaoke timing.</p>
+        <p className="small muted">Optional: if a video has no captions and no subtitles we can fetch, you can paste its transcript here before you fetch/upload (split into sentences, 5s each). Otherwise the confirm page can create the transcript for you — the "🎙️ Create transcript with Whisper" button listens to the video itself.</p>
         <textarea rows={4} style={{width:'100%'}} value={manualText} onChange={e=>setManualText(e.target.value)} placeholder="Paste the full transcript text here…"/>
       </details>
       <div className="card" style={{marginTop:14,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,flexWrap:'wrap'}}>

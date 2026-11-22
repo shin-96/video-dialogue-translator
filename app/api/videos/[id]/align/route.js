@@ -1,18 +1,19 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { requireUser } from '@/lib/api';
 import { readDB, mutate } from '@/lib/store';
+import { resolveVenv, venvPython } from '@/lib/venv';
+import { resolveAudioFile } from '@/lib/asrAudio';
 
 const run = promisify(execFile);
 export const maxDuration = 600;
 
 // POST /api/videos/[id]/align — align sentence timings to the REAL voice using
 // Whisper word timestamps (scripts/asr_words.py, faster-whisper).
-// - upload/sample videos: transcribe the local file.
-// - youtube videos: download audio with yt-dlp from the scripts venv first.
+// Audio resolution is shared with the transcribe route (lib/asrAudio.js):
+// local file for sample/upload, yt-dlp download for YouTube and web links.
 // If the video already has caption sentences, Whisper words are MAPPED onto
 // them (caption text kept); otherwise Whisper segments become the sentences.
 // On any failure the video keeps its proportional fallback timings untouched.
@@ -28,42 +29,26 @@ export async function POST(req, { params }){
   // Venv lives OUTSIDE the repo by default (it is ~500MB and must never be
   // committed): $ASR_VENV, else ~/workspace/vdt-whisper-venv, else legacy
   // scripts/.venv. Create it with scripts/setup-asr.sh.
-  const venvCandidates = [
-    process.env.ASR_VENV,
-    path.join(os.homedir(),'workspace','vdt-whisper-venv'),
-    path.join(root,'scripts','.venv'),
-  ].filter(Boolean);
-  const venv = venvCandidates.find(p=>fs.existsSync(path.join(p,'bin','python')));
-  const py = venv ? path.join(venv,'bin','python') : null;
+  const venv = resolveVenv(root);
+  const py = venv ? venvPython(venv) : null;
   const script = path.join(root,'scripts','asr_words.py');
   if(!py || !fs.existsSync(script)){
     return Response.json({ error:'ASR not installed on server: run scripts/setup-asr.sh (creates the Whisper venv outside the repo)' }, { status:500 });
   }
 
-  // --- resolve an audio/video file Whisper can read -------------------------
-  let inputFile = null, tmpDir = null;
-  const cleanup = ()=>{ if(tmpDir) { try{ fs.rmSync(tmpDir,{recursive:true,force:true}); }catch{} } };
-  if(v.kind === 'sample'){
-    inputFile = path.join(root,'public','sample.mp4');
-  } else if(v.src && v.src.startsWith('/api/uploads/')){
-    inputFile = path.join(root,'data','uploads', path.basename(v.src));
-  } else if(v.kind === 'youtube' && v.ytId){
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(),'vdt-align-'));
-    const ytdlp = path.join(venv,'bin','yt-dlp');
-    try{
-      await run(ytdlp, ['-x','--audio-format','wav','--no-playlist','-o', path.join(tmpDir,'audio.%(ext)s'),
-        `https://www.youtube.com/watch?v=${v.ytId}`], { timeout: 300000, maxBuffer: 16*1024*1024 });
-    }catch(e){
-      cleanup();
-      return Response.json({ error:'could not download YouTube audio: '+(e.stderr?.toString().slice(-300) || e.message) }, { status:500 });
-    }
-    const f = fs.readdirSync(tmpDir).find(x=>x.startsWith('audio.'));
-    if(!f){ cleanup(); return Response.json({ error:'audio download produced no file' }, { status:500 }); }
-    inputFile = path.join(tmpDir, f);
+  // --- resolve an audio/video file Whisper can read (shared with the
+  // transcribe route: sample / upload / YouTube / web-link all supported) ---
+  let resolved;
+  try{
+    resolved = await resolveAudioFile(v, root);
+  }catch(e){
+    return Response.json({ error: e.message }, { status: e.status || 500 });
   }
+  const inputFile = resolved.file;
+  const cleanup = resolved.cleanup;
   if(!inputFile || !fs.existsSync(inputFile)){
     cleanup();
-    return Response.json({ error:'no local audio source for this video (only uploads, the sample, and YouTube videos can be aligned)' }, { status:400 });
+    return Response.json({ error:'no local audio source for this video' }, { status:400 });
   }
 
   // --- run Whisper ------------------------------------------------------------

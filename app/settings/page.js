@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import Companion from './companion';
 const NAMES = { vi:'Vietnamese', en:'English', zh:'Chinese', ja:'Japanese', ko:'Korean', fr:'French', de:'German', es:'Spanish', ru:'Russian', th:'Thai' };
 export default function Settings(){
   const [me,setMe] = useState(null); const [target,setTarget] = useState('vi'); const [msg,setMsg] = useState('');
@@ -21,5 +22,7 @@ export default function Settings(){
         <span className="small">{me.quota.used.toLocaleString()} / {me.quota.limit.toLocaleString()} tokens used today · resets daily</span></div>
       <button className="btn" onClick={save}>Save settings</button>
       {msg && <span className="small" style={{color:'#7ee2a0'}}>{msg}</span>}
-    </div></div>);
+    </div>
+    <Companion/>
+    </div>);
 }

@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { resolveVenv, venvPython, venvHasCurlCffi } from '@/lib/venv';
 
 const run = promisify(execFile);
 export const maxDuration = 240;
@@ -99,24 +100,7 @@ async function probeContentType(url){
   }catch{ return null; }
 }
 
-function resolveVenv(root){
-  const candidates = [
-    process.env.ASR_VENV,
-    path.join(os.homedir(), 'workspace', 'vdt-whisper-venv'),
-    path.join(root, 'scripts', '.venv'),
-  ].filter(Boolean);
-  return candidates.find(p=>fs.existsSync(path.join(p, 'bin', 'python'))) || null;
-}
 
-function venvHasCurlCffi(venv){
-  try{
-    const libDir = path.join(venv, 'lib');
-    for(const pyDir of fs.readdirSync(libDir)){
-      if(fs.existsSync(path.join(libDir, pyDir, 'site-packages', 'curl_cffi'))) return true;
-    }
-  }catch{ /* no lib dir */ }
-  return false;
-}
 
 // yt-dlp extractor engine. Invoked via `python -m yt_dlp` because the venv's
 // console script can carry a stale shebang after the venv is moved.
@@ -135,7 +119,7 @@ function venvHasCurlCffi(venv){
 async function ytDlpExtract(url, fallbacks = []){
   const venv = resolveVenv(process.cwd());
   if(!venv) return { candidates: [], error: 'yt-dlp engine unavailable (Whisper venv not installed)' };
-  const py = path.join(venv, 'bin', 'python');
+  const py = venvPython(venv);
   const baseArgs = ['-m', 'yt_dlp', '-j', '--no-download', '--no-playlist', '--socket-timeout', '15'];
   if(process.env.VDT_YTDLP_CHECK_CERT !== '1') baseArgs.push('--no-check-certificates');
   if(venvHasCurlCffi(venv)) baseArgs.push('--impersonate', 'chrome');

@@ -10,7 +10,7 @@ export async function POST(req, { params }){
   const db0 = readDB();
   const v0 = db0.videos.find(x=>x.id===id && x.userId===user.id);
   if(!v0) return Response.json({ error:'not found' }, { status:404 });
-  if(!v0.sentences.length) return Response.json({ error:'no transcript to translate (ASR is not configured — paste a transcript or use the sample / a captioned YouTube video)' }, { status:400 });
+  if(!v0.sentences.length) return Response.json({ error:'no transcript to translate — create one first with the "🎙️ Create transcript with Whisper" button on the confirm page, or paste a transcript manually' }, { status:400 });
   const remaining = DAILY_QUOTA - quotaUsed(db0, user.id);
   // Work out how many sentences fit the remaining quota (unless same language).
   let fit = v0.sentences.length, cost = 0;

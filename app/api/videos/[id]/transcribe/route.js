@@ -80,7 +80,7 @@ export async function POST(req, { params }){
     if(asr.language) vid.sourceLang = asr.language;
     // Old translations were aligned to the old sentences — they no longer
     // belong to this transcript.
-    vid.translated = false; vid.target = null; vid.partialCount = undefined;
+    vid.translated = false; vid.target = null; vid.partialCount = undefined; vid.translationTimingSource = undefined;
   });
 
   return Response.json({ ok:true, transcriptSource:'whisper-asr', timingSource:'whisper', language: asr.language || null, sentences: sentenceCount, words: wordCount });

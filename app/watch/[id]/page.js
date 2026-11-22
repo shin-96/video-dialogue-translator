@@ -13,6 +13,7 @@ export default function Watch(){
   const [q,setQ] = useState(''); const [pop,setPop] = useState(null); const [savedMsg,setSavedMsg] = useState('');
   const [autoScroll,setAutoScroll] = useState(true); const [followPaused,setFollowPaused] = useState(false);
   const [aligning,setAligning] = useState(false); const [alignMsg,setAlignMsg] = useState('');
+  const [syncing,setSyncing] = useState(false); const [syncMsg,setSyncMsg] = useState('');
   const videoRef = useRef(null); const ytRef = useRef(null); const apiRef = useRef(null);
   const tRef = useRef(0); tRef.current = t;
   const loopRef = useRef(false); loopRef.current = loop;
@@ -160,6 +161,17 @@ export default function Watch(){
     }catch(e){ setAlignMsg('Align failed: '+e.message+' — keeping the estimated timings.'); }
     setAligning(false);
   }
+  async function syncTranslationTiming(){
+    setSyncing(true); setSyncMsg('Aligning translation words to the spoken phrases… (can take a while)');
+    try{
+      const r = await fetch(`/api/videos/${id}/align-translation`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+      const j = await r.json();
+      if(!r.ok) throw new Error(j.error || 'sync failed');
+      await loadVideo();
+      setSyncMsg(`Translation timing synced ✓ — ${j.aligned}/${j.considered} sentences now light each translated word inside the spoken phrase it belongs to, so pauses no longer desync the meaning.`);
+    }catch(e){ setSyncMsg('Sync failed: '+e.message+' — keeping the estimated translation timing.'); }
+    setSyncing(false);
+  }
 
   if(err) return <p style={{color:'#ff8a70'}}>{err}</p>;
   if(!v) return <p className="muted">Loading…</p>;
@@ -170,7 +182,7 @@ export default function Watch(){
 
   return (<div>
     <h1 style={{fontSize:22,letterSpacing:'-.02em',margin:'4px 0 4px'}}>{v.title}</h1>
-    <p className="small muted">{v.kind} · {v.translated? `translated → ${v.target}` : 'not translated yet'} {v.partialCount && v.partialCount < v.sentences.length ? `· partial: first ${v.partialCount} sentences` : ''} · timing: {v.timingSource==='whisper' ? 'Whisper (real voice)' : 'estimated'} {!v.translated && <a href={`/confirm/${id}`} style={{color:'#FF4D00',fontWeight:600}}>Translate →</a>}</p>
+    <p className="small muted">{v.kind} · {v.translated? `translated → ${v.target}` : 'not translated yet'} {v.partialCount && v.partialCount < v.sentences.length ? `· partial: first ${v.partialCount} sentences` : ''} · timing: {v.timingSource==='whisper' ? 'Whisper (real voice)' : 'estimated'}{v.translated ? ` · translation timing: ${v.translationTimingSource==='phrase-align' ? 'phrase-synced' : 'estimated'}` : ''} {!v.translated && <a href={`/confirm/${id}`} style={{color:'#FF4D00',fontWeight:600}}>Translate →</a>}</p>
     <div style={{display:'grid',gridTemplateColumns:'minmax(0,1.15fr) minmax(0,.85fr)',gap:0,border:'1px solid #1F2023',borderRadius:14,overflow:'hidden',marginTop:12}}>
       <div style={{padding:14,borderRight:'1px solid #1F2023',background:'#0B0C0E'}}>
         <div className="player-wrap" style={{aspectRatio: v.kind==='youtube' ? '16/9' : undefined}}>
@@ -200,7 +212,16 @@ export default function Watch(){
           </button>
           {v.timingSource==='whisper' && <span className="small" style={{color:'#7ee2a0'}}>Word timings are synced to the real voice.</span>}
         </div>
+        {v.translated && <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:10,alignItems:'center'}}>
+          <button className="btn-ghost" style={{padding:'8px 13px',fontSize:12}} onClick={syncTranslationTiming} disabled={syncing}>
+            {syncing ? 'Syncing…' : '🔗 Sync translation timing'}
+          </button>
+          {v.translationTimingSource==='phrase-align'
+            ? <span className="small" style={{color:'#7ee2a0'}}>Translation words are synced to the spoken phrases.</span>
+            : <span className="small muted">For translations made before timing sync existed (or after re-transcribing): gives each translated word the real timing of the phrase it belongs to.</span>}
+        </div>}
         {alignMsg && <div className="small" style={{color:'#a7abb3',marginTop:8,lineHeight:1.5}}>{alignMsg}</div>}
+        {syncMsg && <div className="small" style={{color:'#a7abb3',marginTop:8,lineHeight:1.5}}>{syncMsg}</div>}
         {pop && <div className="card" style={{marginTop:12}}>
           <div className="small muted">WORD</div><b style={{fontSize:17}}>{pop.word}</b>
           <div className="small" style={{marginTop:6}}>In context: “{pop.sentence}”</div>

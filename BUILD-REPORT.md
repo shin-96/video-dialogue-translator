@@ -441,3 +441,73 @@ trang Confirm.
 - beam_size=5 + model lớn hơn = chậm hơn trên CPU: small tốn ~2.5× thời
   gian của base cho cùng audio trên VM này; medium chưa benchmark (tải
   ~1.5GB, dự kiến chậm hơn nữa).
+
+## Translation timing sync (phrase alignment) (2026-11-22, vòng sửa theo phản hồi: "sao giọng đọc và dịch không khớp vậy")
+
+### Vấn đề
+Từ gốc sáng theo timestamp Whisper THẬT, nhưng từ dịch sáng theo tiến độ
+giọng đọc tổng thể (mỗi từ sáng khi progress vượt qua "trung tâm tỉ lệ"
+của nó theo độ dài ký tự — một vệt quét đều). Câu có khoảng lặng ở giữa,
+đoạn nói nhanh/chậm, hay thứ tự từ khác nhau là bản dịch lệch khỏi ý đang
+được nói.
+
+### Cách sửa — `lib/align.js`
+1. Cắt từ gốc thành **cụm** tại khoảng lặng ≥0.30s hoặc dấu câu giữa câu.
+2. Dịch riêng từng cụm (qua `translateSentence`, có cache).
+3. Tokenize bản dịch toàn câu; tìm dãy token của từng cụm dịch trong đó
+   (chuẩn hoá: thường hoá, bỏ dấu câu, bỏ dấu tiếng Việt). Token thừa gán
+   cho cụm gần nhất; cụm không khớp liên tục được chia tỉ lệ theo độ dài
+   trong phần token còn lại. Các cụm phủ kín mọi token, không chồng lấn.
+4. Trong cụm: số từ bằng nhau thì ghép 1:1 theo thứ tự; khác nhau thì
+   phân bổ token theo tỉ lệ thời lượng từ gốc — mỗi token dịch nhận
+   start/end THẬT nằm trong khoảng nói của cụm.
+Kết quả lưu vào `sentence.twords`. Route dịch tự tính twords cho câu có
+`words`; route mới `POST /api/videos/[id]/align-translation` tính lại cho
+video đã dịch từ trước; trang Watch có nút "🔗 Sync translation timing".
+`translationWordsAt` dùng twords khi có (độ dài phải khớp bản dịch hiện
+tại — lệch là coi như cũ và rơi về quét tỉ lệ như trước). Video không có
+twords chạy y như cũ.
+
+### Bằng chứng test (server production :3100, tài khoản test riêng)
+Tập phim: **【阿甘妙世界】The Awareness** — Bilibili **BV1zW4y167zf**,
+UP 云里雾里不知物理 (một trong hai UP được chỉ định; BV1kY411w7zX được
+chỉ định trước chỉ là clip 2 phút). Bài đăng dạng分P (intro 5s + 4 phần);
+đã tải cả 5 phần, ghép thành 1 file 685.9s (11:26), upload vào app (luồng
+link của app chỉ lấy p1; bài test sync cần 1 record liên tục). Whisper
+model **small** nghe ra **en** (âm thanh gốc tiếng Anh): 279 câu, 1637 từ;
+dịch en→vi 279/279, 0 lỗi.
+
+Đo trên cùng một phép phân đoạn tham chiếu (cụm theo aligner): một từ
+dịch "đúng nhịp" khi thời điểm nó sáng rơi trong khoảng nói của cụm nó
+thuộc về. Tổng 2187 từ dịch trên 279 câu:
+
+| Chỉ số | Logic cũ (quét đều) | Sau khi sửa (twords) |
+|---|---|---|
+| % từ sáng trong cụm của nó — toàn bộ | 88.9% | **100%** |
+| — chỉ câu nhiều cụm (130 câu, 1160 từ) | 79.1% | 100% |
+| — câu có lặng ≥0.5s giữa câu (6 câu, 34 từ) | **38.2%** | 100% |
+| Trung vị \|lệch so với điểm bắt đầu cụm\| (cụm nhiều từ) | 0.557s | — |
+| Độ phủ twords trên câu đã dịch có `words` | — | **279/279 = 100%** |
+
+Mục tiêu ≥98% trong-cụm và ≥90% độ phủ: đều đạt ngay vòng đo đầu tiên.
+Ca nặng nhất của logic cũ: câu "Oh, it's Green Week." lặng 2.42s sau
+"Oh," — bản dịch cũ sáng "đó là Tuần lễ" ngay trong khoảng lặng
+(91.5–93.1s, giọng bắt đầu lại ở 93.8s); bản mới chờ đúng cụm. Câu
+"No. No, I didn't." (lặng 0.68s): cũ chỉ 1/6 từ trong-cụm, mới 6/6.
+
+Regression: sample (không có `words`) dịch 4/4, không twords, vẫn chạy
+fallback tỉ lệ; twords cũ lệch độ dài tự rơi về fallback; `npm run build`
+PASS; nút Sync xuất hiện trong bundle trang Watch.
+
+### Giới hạn thành thật
+- Căn chỉnh ở mức **cụm**, không phải mức ngữ nghĩa từng từ: trong một
+  cụm ngắn, thứ tự từ địa phương bị đảo (vd tính từ/danh từ) vẫn có thể
+  lệch một phần giây.
+- Trong cụm giả định thứ tự đơn điệu; cụm nào engine dịch lại bằng từ
+  khác hẳn khi dịch riêng (không khớp liên tục) thì rơi về chia tỉ lệ
+  trong nội bộ cụm — vẫn bị chặn trong khoảng nói của cụm, nhưng kém
+  chính xác hơn khớp trực tiếp.
+- Lần dịch đầu tiên tốn thêm các call dịch theo cụm (sau đó có cache);
+  video dịch trước tính năng này cần bấm nút Sync một lần.
+- Video không có timestamp từ thật của Whisper (chưa align/transcribe)
+  vẫn dùng phép quét tỉ lệ cũ — sync này chỉ hoạt động khi đã có `words`.

@@ -14,6 +14,8 @@ export default function Watch(){
   const [autoScroll,setAutoScroll] = useState(true); const [followPaused,setFollowPaused] = useState(false);
   const [aligning,setAligning] = useState(false); const [alignMsg,setAlignMsg] = useState('');
   const [syncing,setSyncing] = useState(false); const [syncMsg,setSyncMsg] = useState('');
+  const [syncNoWords,setSyncNoWords] = useState(false);
+  const autoSyncRef = useRef(false); const syncingRef = useRef(false);
   const videoRef = useRef(null); const ytRef = useRef(null); const apiRef = useRef(null);
   const tRef = useRef(0); tRef.current = t;
   const loopRef = useRef(false); loopRef.current = loop;
@@ -22,6 +24,13 @@ export default function Watch(){
   const autoScrollRef = useRef(true); autoScrollRef.current = autoScroll;
   const followPausedRef = useRef(false);
   const setPaused = (p)=>{ followPausedRef.current = p; setFollowPaused(p); };
+
+  // A sentence "has words" only when Whisper gave it REAL word timings.
+  const hasRealWords = (s)=> Array.isArray(s.words) && s.words.length > 0;
+  // twords are valid only while they still line up 1:1 with the current
+  // translation's tokens (same staleness guard as lib/text.js).
+  const twordsValid = (s)=> !!s.translation && Array.isArray(s.twords) && s.twords.length > 0
+    && s.twords.length === s.translation.split(/\s+/).filter(Boolean).length;
 
   async function loadVideo(){
     const r = await fetch(`/api/videos/${id}`); const j = await r.json();
@@ -89,6 +98,22 @@ export default function Watch(){
     const iv = setInterval(()=>{ if(tRef.current>0) fetch(`/api/videos/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({progress:Math.floor(tRef.current)})}); },5000);
     return ()=>clearInterval(iv);
   },[id]);
+
+  // Self-healing translation timing: a video translated before phrase sync
+  // existed (or re-transcribed since) can hold translations + real word
+  // timings but no twords — sync it ONCE automatically on load instead of
+  // waiting for the user to discover the Sync button. When everything
+  // already has valid twords this never fires. When NO sentence has real
+  // word timings it also stays quiet (Align needs Whisper and real time);
+  // the persistent notice under the header covers that case instead.
+  useEffect(()=>{
+    if(!v || autoSyncRef.current) return;
+    if(!v.translated) return;
+    const needsSync = v.sentences.some(s=> s.translation && hasRealWords(s) && !twordsValid(s));
+    if(!needsSync) return;
+    autoSyncRef.current = true;
+    runSync();
+  },[v]);
 
   // Active sentence: exact match first; if t falls in a GAP between sentences
   // (common right after a seek/scrub), fall back to the last sentence that has
@@ -161,17 +186,71 @@ export default function Watch(){
     }catch(e){ setAlignMsg('Align failed: '+e.message+' — keeping the estimated timings.'); }
     setAligning(false);
   }
-  async function syncTranslationTiming(){
-    setSyncing(true); setSyncMsg('Aligning translation words to the spoken phrases… (can take a while)');
+  // Shared translation-timing sync (manual Sync button + auto-sync on
+  // load). Always reports the outcome — never a silent no-op. Smart edge
+  // case: if NO sentence carries real Whisper word timings, phrase sync
+  // has nothing to sync against, so run the Align flow FIRST (same
+  // endpoint the Align button uses), then align-translation, then reload.
+  async function runSync(){
+    if(syncingRef.current) return;
+    syncingRef.current = true;
+    setSyncing(true); setSyncMsg('Syncing translation timing…');
     try{
-      const r = await fetch(`/api/videos/${id}/align-translation`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
-      const j = await r.json();
-      if(!r.ok) throw new Error(j.error || 'sync failed');
+      if(v && v.translated && !v.sentences.some(hasRealWords)){
+        setSyncMsg('No real voice timings yet — running Align (Whisper) first, then syncing the translation… (can take a while)');
+        const ar = await fetch(`/api/videos/${id}/align`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+        const aj = await ar.json();
+        if(!ar.ok) throw new Error(aj.error || 'align failed');
+        setSyncMsg('Voice timings aligned ✓ — now syncing the translation timing…');
+      }
+      // Chunked loop: one request syncs at most CHUNK sentences and saves
+      // them before responding, so even a long video never dies inside a
+      // single fetch (the original bug: one request for hundreds of
+      // sentences, hundreds of phrase translations, one dead fetch, zero
+      // saved). A failed chunk is retried ONCE; a second failure stops the
+      // loop — chunks already saved keep their twords, so pressing Sync
+      // again resumes cheaply (phrase translations are cached server-side).
+      const CHUNK = 40;
+      let from = 0, total = v.sentences.length, alignedSum = 0, noWordsSum = 0, noTrSum = 0, done = false;
+      while(!done){
+        let j = null, lastErr = null;
+        for(let attempt = 0; attempt < 2 && !j; attempt++){
+          try{
+            const r = await fetch(`/api/videos/${id}/align-translation`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ from, limit: CHUNK })});
+            const jj = await r.json();
+            if(!r.ok) throw new Error(jj.error || 'sync failed');
+            j = jj;
+          }catch(e){ lastErr = e; }
+        }
+        if(!j || (j.processedUntil <= from && !j.done)){
+          await loadVideo();
+          setSyncMsg(`Sync stopped at ${from}/${total} — press Sync to continue.${lastErr ? ` (${lastErr.message})` : ''} Sentences already synced keep their timing.`);
+          setSyncing(false); syncingRef.current = false;
+          return;
+        }
+        alignedSum += j.aligned; noWordsSum += j.skippedNoWords; noTrSum += j.skippedNoTranslation;
+        total = j.total; from = j.processedUntil; done = j.done;
+        if(!done) setSyncMsg(`Syncing translation timing… ${from}/${total}`);
+      }
       await loadVideo();
-      setSyncMsg(`Translation timing synced ✓ — ${j.aligned}/${j.considered} sentences now light each translated word inside the spoken phrase it belongs to, so pauses no longer desync the meaning.`);
+      if(alignedSum === 0 && noWordsSum > 0){
+        setSyncNoWords(true);
+        setSyncMsg(`Translation timing could not be synced — ${noWordsSum}/${total} sentences have a translation but no real voice timings, so there is nothing to phrase-sync against. Run “🎯 Align timing to voice (Whisper)” above first, then Sync again.`);
+      } else {
+        setSyncNoWords(false);
+        let msg = `Translation timing synced: ${alignedSum}/${total} sentences`;
+        const skips = [];
+        if(noWordsSum) skips.push(`${noWordsSum} skipped — no voice timings`);
+        if(noTrSum) skips.push(`${noTrSum} skipped — not translated`);
+        if(skips.length) msg += ` (${skips.join('; ')})`;
+        msg += ' — each translated word now lights inside the spoken phrase it belongs to, so pauses no longer desync the meaning.';
+        setSyncMsg(msg);
+      }
     }catch(e){ setSyncMsg('Sync failed: '+e.message+' — keeping the estimated translation timing.'); }
     setSyncing(false);
+    syncingRef.current = false;
   }
+  async function syncTranslationTiming(){ return runSync(); }
 
   if(err) return <p style={{color:'#ff8a70'}}>{err}</p>;
   if(!v) return <p className="muted">Loading…</p>;
@@ -179,10 +258,20 @@ export default function Watch(){
   const activeS = activeIdx >= 0 ? v.sentences[activeIdx] : null;
   const activeOrig = activeS ? origWords(activeS) : [];
   const activeTr = activeS ? translationWordsAt(activeS, t, true) : [];
+  // Translation-timing state derived from the loaded data (header counts +
+  // the no-voice-timings notice): how many translated sentences already
+  // carry valid phrase-aligned twords, and whether ANY translated sentence
+  // has real voice timings to sync against at all.
+  const trSentences = v.sentences.filter(s=>s.translation);
+  const trSyncedCount = trSentences.filter(twordsValid).length;
+  const anyRealWords = v.sentences.some(hasRealWords);
+  const showNoWordsNotice = syncNoWords
+    || (!!v.translated && trSentences.length > 0 && !trSentences.some(hasRealWords));
 
   return (<div>
     <h1 style={{fontSize:22,letterSpacing:'-.02em',margin:'4px 0 4px'}}>{v.title}</h1>
-    <p className="small muted">{v.kind} · {v.translated? `translated → ${v.target}` : 'not translated yet'} {v.partialCount && v.partialCount < v.sentences.length ? `· partial: first ${v.partialCount} sentences` : ''} · timing: {v.timingSource==='whisper' ? 'Whisper (real voice)' : 'estimated'}{v.translated ? ` · translation timing: ${v.translationTimingSource==='phrase-align' ? 'phrase-synced' : 'estimated'}` : ''} {!v.translated && <a href={`/confirm/${id}`} style={{color:'#FF4D00',fontWeight:600}}>Translate →</a>}</p>
+    <p className="small muted">{v.kind} · {v.translated? `translated → ${v.target}` : 'not translated yet'} {v.partialCount && v.partialCount < v.sentences.length ? `· partial: first ${v.partialCount} sentences` : ''} · timing: {v.timingSource==='whisper' ? 'Whisper (real voice)' : 'estimated'}{v.translated ? (trSyncedCount > 0 ? ` · translation timing: phrase-align (${trSyncedCount}/${trSentences.length})` : ` · translation timing: estimated${anyRealWords ? '' : ' (no voice timings)'}`) : ''} {!v.translated && <a href={`/confirm/${id}`} style={{color:'#FF4D00',fontWeight:600}}>Translate →</a>}</p>
+    {showNoWordsNotice && <div className="small" style={{color:'#ffb37e',marginTop:6,lineHeight:1.5}}>⚠ This video has no real voice timings yet, so the translation can't be phrase-synced. Run Align (Whisper) first, then Sync.</div>}
     <div style={{display:'grid',gridTemplateColumns:'minmax(0,1.15fr) minmax(0,.85fr)',gap:0,border:'1px solid #1F2023',borderRadius:14,overflow:'hidden',marginTop:12}}>
       <div style={{padding:14,borderRight:'1px solid #1F2023',background:'#0B0C0E'}}>
         <div className="player-wrap" style={{aspectRatio: v.kind==='youtube' ? '16/9' : undefined}}>
@@ -216,9 +305,9 @@ export default function Watch(){
           <button className="btn-ghost" style={{padding:'8px 13px',fontSize:12}} onClick={syncTranslationTiming} disabled={syncing}>
             {syncing ? 'Syncing…' : '🔗 Sync translation timing'}
           </button>
-          {v.translationTimingSource==='phrase-align'
-            ? <span className="small" style={{color:'#7ee2a0'}}>Translation words are synced to the spoken phrases.</span>
-            : <span className="small muted">For translations made before timing sync existed (or after re-transcribing): gives each translated word the real timing of the phrase it belongs to.</span>}
+          {trSyncedCount > 0
+            ? <span className="small" style={{color:'#7ee2a0'}}>Translation words are synced to the spoken phrases ({trSyncedCount}/{trSentences.length} sentences).</span>
+            : <span className="small muted">Gives each translated word the real timing of the phrase it belongs to. Runs automatically when a translated video already has voice timings; if this video has none yet, Sync runs Align (Whisper) first.</span>}
         </div>}
         {alignMsg && <div className="small" style={{color:'#a7abb3',marginTop:8,lineHeight:1.5}}>{alignMsg}</div>}
         {syncMsg && <div className="small" style={{color:'#a7abb3',marginTop:8,lineHeight:1.5}}>{syncMsg}</div>}

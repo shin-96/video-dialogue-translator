@@ -511,3 +511,69 @@ PASS; nút Sync xuất hiện trong bundle trang Watch.
   video dịch trước tính năng này cần bấm nút Sync một lần.
 - Video không có timestamp từ thật của Whisper (chưa align/transcribe)
   vẫn dùng phép quét tỉ lệ cũ — sync này chỉ hoạt động khi đã có `words`.
+
+### Addendum (2026-11-22, tối): sync TỰ CHỮA + CHIA NHỎ theo chunk — vòng sửa theo phản hồi: "vẫn vậy, có khác gì đâu" và "Sync failed: Failed to fetch"
+
+Hai lỗi thật user gặp trên máy của họ:
+
+1. **"Bấm Sync mà không thấy khác gì"** — video dịch từ trước không có
+   `twords`; tệ hơn, nếu transcript đến từ phụ đề của site (không có
+   `words` thật của Whisper) thì `alignTranslation` trả null cho mọi câu
+   và nút Sync *im lặng không làm gì cả*.
+2. **"Sync failed: Failed to fetch"** — route cũ đồng bộ CẢ video trong
+   một request: hàng trăm call dịch theo cụm chạy nối tiếp, fetch chết
+   giữa chừng và **không lưu được gì**.
+
+Cách sửa:
+
+- **Route luôn báo số, không bao giờ no-op lặng lẽ.** Response của
+  `POST /api/videos/[id]/align-translation` giờ có
+  `{ aligned, skippedNoWords, skippedNoTranslation, total }` đếm trên các
+  câu đã xử lý — câu bị bỏ qua vì thiếu `words` hay thiếu bản dịch đều
+  được đếm và nói rõ.
+- **Chia nhỏ theo chunk.** Route nhận `{ from, limit }` (không truyền =
+  xử lý tất cả như cũ), trả thêm `processedUntil` + `done`; mỗi chunk
+  được lưu xuống DB trước khi trả lời. Trang Watch (cả auto-sync lẫn nút
+  Sync) gọi lặp `limit=40` cho tới `done`, hiện tiến độ trực tiếp
+  ("Syncing translation timing… 120/279"). Chunk nào lỗi được thử lại 1
+  lần; lỗi tiếp thì dừng ở đó và hiện "Sync stopped at X/Y — press Sync
+  to continue" — các chunk đã xong giữ nguyên twords, bấm Sync lại là
+  chạy tiếp rẻ (cache dịch theo cụm còn nguyên).
+- **Tự chữa khi mở trang.** Trang Watch tự chạy sync MỘT lần khi nạp
+  xong nếu video đã dịch + có câu mang `words` thật nhưng thiếu/sai
+  twords (guard bằng ref, tối đa 1 lần mỗi lần mở trang; video đã sync
+  đủ thì không chạy). Không tự chạy khi chưa có gì để sync.
+- **Không có `words` thì nói thẳng trên màn hình.** Notice cố định dưới
+  dòng timing: "This video has no real voice timings yet, so the
+  translation can't be phrase-synced. Run Align (Whisper) first, then
+  Sync." Nút Sync cũng thông minh hơn: video chưa có câu nào có `words`
+  thì Sync tự chạy Align (Whisper) trước rồi mới align-translation.
+- **Header đếm được.** Dòng timing giờ hiện
+  `translation timing: phrase-align (212/279)` khi đã sync (đếm từ dữ
+  liệu thật đã nạp), hoặc `estimated (no voice timings)` khi chưa có
+  mốc giọng thật.
+- **Nhanh hơn ở tầng align (`lib/align.js`).** (a) *Đường tắt một cụm:*
+  câu chỉ có 1 cụm thì bản dịch của cụm CHÍNH LÀ bản dịch cả câu — không
+  gọi API dịch nào cả, token được phân bổ trên các từ gốc theo thời
+  lượng thật (đa số câu thoại là một cụm — đây là lý do sync cả tập phim
+  khi cache ấm chỉ tốn chưa tới 1 giây). (b) Câu nhiều cụm: dịch các cụm
+  qua một pool giới hạn tối đa **4 call đang bay** (kèm cache có sẵn),
+  các câu trong một chunk cũng xử lý song song có giới hạn trên cùng pool
+  đó.
+
+Bằng chứng test (server production :3100, tài khoản test riêng; tập
+Gumball *The Awareness* 304 câu/1657 từ, Whisper base, dịch en→vi
+304/304):
+
+| Ca | Kết quả |
+|---|---|
+| A — sample không có `words` | align-translation: `aligned 0, skippedNoWords 4/4, done true` — nói rõ lý do thay vì im lặng; bundle trang Watch chứa notice + logic auto-sync + vòng chunk |
+| B — có `words`, xoá sạch twords giả lập video cũ | gọi 1 lần (không body): `aligned 304/304`, GET thấy twords trở lại, 0.65s khi cache ấm |
+| C — gọi lại trên video đã sync đủ | `aligned 304` ổn định, không lỗi, không đổi dữ liệu |
+| D — xoá twords, chạy vòng chunk `limit=10` | 31 chunk; `done=false` cho 30 chunk đầu, `true` ở chunk cuối; cộng dồn `aligned = 304`; chunk chậm nhất **0.104s** (cache ấm; trần thiết kế <20s/chunk 40 khi cache lạnh nhờ fast path + pool 4) |
+| E — đường tắt một cụm | dọn sạch cache dịch rồi align 2 câu tổng hợp: cache chỉ xuất hiện đúng 2 key của câu NHIỀU cụm (`I came home`, `and slept` — ca đối chứng), **0 call** cho câu một cụm nhưng twords vẫn đúng (token phân bổ trong đúng khoảng nói, đơn điệu); câu nhiều cụm khớp 1:1 từng cụm (`và` sáng ở 3.3s = điểm bắt đầu cụm 2) |
+
+Giới hạn còn lại: chunk lạnh (lần sync đầu của video dài, cache rỗng)
+vẫn tốn thời gian theo số cụm nhiều-cụm và tốc độ engine miễn phí —
+nhưng nay nó *tiến triển từng chunk và sống sót qua lỗi mạng*, không
+còn chết toàn cục như trước.

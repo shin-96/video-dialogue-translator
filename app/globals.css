@@ -20,4 +20,10 @@ input:focus,textarea:focus{border-color:var(--accent)}
 .w{border-radius:4px;padding:0 1px;transition:all .15s}
 .w.on{background:var(--accent);color:#fff}
 .w:hover{background:#2a2c31}
-.wt.on{color:#ffb59d;font-weight:700}
+.wt{border-radius:4px;padding:0 1px;transition:all .15s}
+.wt.on{background:rgba(255,77,0,.38);color:#ffe9e0;font-weight:700;box-shadow:inset 0 0 0 1px rgba(255,77,0,.55)}
+.player-wrap{position:relative;border-radius:10px;overflow:hidden;background:#000}
+.sub-overlay{position:absolute;left:0;right:0;bottom:0;padding:26px 14px 10px;background:linear-gradient(transparent,rgba(0,0,0,.82) 45%);pointer-events:none;text-align:center}
+.sub-overlay .ov-orig{font-size:17px;font-weight:700;line-height:1.5;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.8)}
+.sub-overlay .ov-tr{font-size:14.5px;line-height:1.5;color:#e8e9eb;margin-top:3px;text-shadow:0 1px 3px rgba(0,0,0,.8)}
+.follow-chip{position:sticky;bottom:10px;margin:8px auto 4px;display:block;background:var(--accent);color:#fff;border:0;border-radius:999px;padding:7px 14px;font-size:12px;font-weight:700;box-shadow:0 4px 14px rgba(0,0,0,.5);z-index:5}

@@ -55,3 +55,69 @@ Next.js 15 (App Router, plain JS) + plain CSS in `app/globals.css` (no Tailwind 
 - YouTube thật dQw4w9WgXcQ: lấy 61 câu captions. PASS.
 - Upload sample.mp4 -> src phát được; progress PATCH 17 persist ở library, savedCount=3; logout -> `{ok:true}`, phiên sạch. PASS.
 - Build cuối: PASS. Dữ liệu test đã xóa trước khi push.
+
+## Karaoke sync fix (2026-11-22, vòng sửa theo phản hồi người dùng)
+
+Người dùng phản hồi 4 lỗi: (1) chữ dịch không chạy/tô sáng theo, (2) không vừa xem vừa
+lướt được — panel thoại không tự cuộn tới câu đang phát, (3) tua video thì phần dịch
+phải tua theo, (4) tốc độ chạy chữ lệch nhiều so với giọng đọc thật.
+
+### Đã sửa
+- **A. Karaoke bản dịch ngang hàng bản gốc + overlay trên video:** `.wt.on` giờ có nền
+  accent 38% + viền accent + chữ sáng (trước chỉ là màu chữ nhạt gần như không thấy).
+  Thêm overlay phụ đề song ngữ lớn ngay trên khung video (cả YouTube lẫn file):
+  dòng gốc tô theo từng từ, dòng dịch tô theo tiến độ giọng — cùng dùng chung state `t`.
+- **B. Auto-scroll:** panel tự cuộn mượt (scrollIntoView, block:center) tới câu đang
+  phát. Có nút "Auto-scroll: On/Off" (mặc định On). Người dùng tự lăn chuột/chạm vào
+  panel thì follow tạm dừng và hiện chip "▼ Follow the voice" để quay lại — không
+  giành cuộn với người dùng.
+- **C. Tua là đồng bộ:** khi `t` rơi vào khoảng trống giữa hai câu, câu active rơi về
+  câu gần nhất đã bắt đầu (không mất highlight như trước). `<video>` có
+  onTimeUpdate/onSeeked set `t` ngay; polling YouTube giảm xuống 100ms. Cả gốc và
+  dịch đều suy ra từ cùng một `t` trong cùng một lần render nên tua là cả hai nhảy theo.
+- **D. Timing giọng THẬT bằng Whisper (sửa gốc rễ lỗi 4):**
+  - `scripts/asr_words.py`: faster-whisper với `word_timestamps=True`, xuất JSON
+    {sentences:[{text,start,end,words:[{w,start,end}]}]}. Audio được giải mã bằng
+    ffmpeg→numpy (né đường PyAV của faster-whisper, vốn hỏng với PyAV ≥15 —
+    lỗi `metadata_errors`). Model qua env `WHISPER_MODEL` (mặc định `tiny`).
+  - Venv tại `scripts/.venv` (đã gitignore): `python3 -m venv scripts/.venv &&
+    scripts/.venv/bin/pip install faster-whisper yt-dlp`.
+  - API `POST /api/videos/[id]/align` (auth, đúng chủ video): upload/sample dùng file
+    local, YouTube tải audio bằng yt-dlp của venv. Có phụ đề sẵn → MAP từ của Whisper
+    lên câu phụ đề theo điểm giữa của từ (giữ nguyên chữ phụ đề); chưa có → dùng luôn
+    segment của Whisper làm câu. Video được gắn `timingSource:'whisper'`. Lỗi →
+    500 kèm lý do, timing cũ giữ nguyên.
+  - Trang xem: câu có `words` thật thì tô gốc theo timing thật; bản dịch tô theo
+    PROGRESS của giọng trong câu (từ đầu từ đầu tiên → cuối từ cuối cùng), từ dịch
+    sáng khi tiến độ vượt vị trí tỉ lệ của nó. Chưa align thì giữ hành vi tỉ lệ cũ.
+  - Nút "🎯 Align timing to voice (Whisper)" trên trang xem, có trạng thái đang chạy
+    và báo kết quả/lỗi trung thực.
+
+### Bằng chứng test (server production :3100)
+- Script độc lập trên bài nói thật của JFK (11s, whisper.cpp samples): ra đúng nguyên
+  văn, timing từng từ KHÔNG đều — độ dài từ 0,18s→1,12s, có khoảng lặng thật 1,1s sau
+  "Americans," (2,30→3,40s). Phân bổ tỉ lệ theo độ dài chữ không thể tạo ra số này.
+- Align đầu-cuối, video upload không phụ đề: `POST align` → {sentences:1, words:22},
+  video có `timingSource:'whisper'`, 22 từ với timing thật được lưu.
+- Align đầu-cuối, video có phụ đề dán tay (2 câu, khung 0–5/5–10 nhân tạo): chữ phụ đề
+  được GIỮ NGUYÊN, 22/22 từ Whisper được map vào 2 câu (7+15), durations không đều.
+- Align trên video mẫu (chỉ có tiếng tone, không có giọng): trả lỗi trung thực
+  "Whisper found no speech — keeping previous timings", 4 câu mẫu còn nguyên.
+- Chưa đăng nhập gọi align → 401. Luồng sample cũ: tạo video + trang xem 200, không hồi quy.
+- `npm run build` PASS (có route /api/videos/[id]/align; chuỗi UI mới "Auto-scroll",
+  "Follow the voice", ".sub-overlay", ".wt.on" đều có trong bundle production).
+
+### Giới hạn thành thật
+- Model `tiny` nhanh (~4s cho 11s audio trên CPU máy này) nhưng nhận chữ kém hơn
+  `base`/`small`, nhất là tên riêng và tiếng không phải tiếng Anh; đặt
+  `WHISPER_MODEL=base` để chính xác hơn, đổi lại chậm hơn. Timing từ của Whisper là
+  ước lượng theo model, không phải mốc đo âm học tuyệt đối.
+- Map từ lên phụ đề: nếu cách chia câu của phụ đề khác hẳn cách ngắt câu của Whisper,
+  từ ở vùng biên được gán cho câu gần nhất — chữ đúng câu có thể lệch 1–2 từ ở điểm nối.
+- Tô sáng bản dịch vẫn là ánh xạ theo tiến độ (progress-based) — không tồn tại timing
+  âm thanh cho bản dịch, đây là xấp xỉ tốt nhất có thể, nhưng đã bám theo nhịp giọng
+  thật thay vì bám theo khung thời gian phụ đề như trước.
+- Tốc độ CPU: video dài (30–60 phút) với model tiny trên CPU sẽ mất vài phút; endpoint
+  cho timeout 10 phút và nút align có trạng thái chờ, nhưng chưa có hàng đợi nền.
+- YouTube: yt-dlp tải audio có thể bị YouTube chặn theo IP/đợt; khi đó align báo lỗi
+  rõ ràng và app vẫn chạy với timing ước lượng.

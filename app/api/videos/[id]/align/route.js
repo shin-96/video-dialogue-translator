@@ -1,0 +1,123 @@
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { requireUser } from '@/lib/api';
+import { readDB, mutate } from '@/lib/store';
+
+const run = promisify(execFile);
+export const maxDuration = 600;
+
+// POST /api/videos/[id]/align — align sentence timings to the REAL voice using
+// Whisper word timestamps (scripts/asr_words.py, faster-whisper).
+// - upload/sample videos: transcribe the local file.
+// - youtube videos: download audio with yt-dlp from the scripts venv first.
+// If the video already has caption sentences, Whisper words are MAPPED onto
+// them (caption text kept); otherwise Whisper segments become the sentences.
+// On any failure the video keeps its proportional fallback timings untouched.
+export async function POST(req, { params }){
+  const { user, error } = await requireUser(); if(error) return error;
+  const { id } = await params;
+  const body = await req.json().catch(()=>({}));
+  const db = readDB();
+  const v = db.videos.find(x=>x.id===id && x.userId===user.id);
+  if(!v) return Response.json({ error:'not found' }, { status:404 });
+
+  const root = process.cwd();
+  // Venv lives OUTSIDE the repo by default (it is ~500MB and must never be
+  // committed): $ASR_VENV, else ~/workspace/vdt-whisper-venv, else legacy
+  // scripts/.venv. Create it with scripts/setup-asr.sh.
+  const venvCandidates = [
+    process.env.ASR_VENV,
+    path.join(os.homedir(),'workspace','vdt-whisper-venv'),
+    path.join(root,'scripts','.venv'),
+  ].filter(Boolean);
+  const venv = venvCandidates.find(p=>fs.existsSync(path.join(p,'bin','python')));
+  const py = venv ? path.join(venv,'bin','python') : null;
+  const script = path.join(root,'scripts','asr_words.py');
+  if(!py || !fs.existsSync(script)){
+    return Response.json({ error:'ASR not installed on server: run scripts/setup-asr.sh (creates the Whisper venv outside the repo)' }, { status:500 });
+  }
+
+  // --- resolve an audio/video file Whisper can read -------------------------
+  let inputFile = null, tmpDir = null;
+  const cleanup = ()=>{ if(tmpDir) { try{ fs.rmSync(tmpDir,{recursive:true,force:true}); }catch{} } };
+  if(v.kind === 'sample'){
+    inputFile = path.join(root,'public','sample.mp4');
+  } else if(v.src && v.src.startsWith('/api/uploads/')){
+    inputFile = path.join(root,'data','uploads', path.basename(v.src));
+  } else if(v.kind === 'youtube' && v.ytId){
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(),'vdt-align-'));
+    const ytdlp = path.join(venv,'bin','yt-dlp');
+    try{
+      await run(ytdlp, ['-x','--audio-format','wav','--no-playlist','-o', path.join(tmpDir,'audio.%(ext)s'),
+        `https://www.youtube.com/watch?v=${v.ytId}`], { timeout: 300000, maxBuffer: 16*1024*1024 });
+    }catch(e){
+      cleanup();
+      return Response.json({ error:'could not download YouTube audio: '+(e.stderr?.toString().slice(-300) || e.message) }, { status:500 });
+    }
+    const f = fs.readdirSync(tmpDir).find(x=>x.startsWith('audio.'));
+    if(!f){ cleanup(); return Response.json({ error:'audio download produced no file' }, { status:500 }); }
+    inputFile = path.join(tmpDir, f);
+  }
+  if(!inputFile || !fs.existsSync(inputFile)){
+    cleanup();
+    return Response.json({ error:'no local audio source for this video (only uploads, the sample, and YouTube videos can be aligned)' }, { status:400 });
+  }
+
+  // --- run Whisper ------------------------------------------------------------
+  const lang = body.language || v.sourceLang || 'auto';
+  let asr;
+  try{
+    const { stdout } = await run(py, [script,'--input',inputFile,'--language',String(lang)],
+      { timeout: 600000, maxBuffer: 64*1024*1024, env:{ ...process.env, WHISPER_MODEL: process.env.WHISPER_MODEL || 'tiny' } });
+    const start = stdout.indexOf('{');
+    asr = JSON.parse(stdout.slice(start));
+  }catch(e){
+    cleanup();
+    return Response.json({ error:'Whisper failed: '+((e.stderr?.toString().slice(-400)) || e.message) }, { status:500 });
+  }
+  cleanup();
+
+  const whisperWords = [];
+  for(const seg of (asr.sentences||[])) for(const w of (seg.words||[])) whisperWords.push(w);
+  if(!whisperWords.length){
+    return Response.json({ error:'Whisper found no speech in this video — keeping previous timings' }, { status:500 });
+  }
+
+  // --- map words onto caption sentences, or adopt Whisper segments -----------
+  let sentenceCount = 0, wordCount = 0;
+  mutate(d=>{
+    const vid = d.videos.find(x=>x.id===id && x.userId===user.id);
+    if(!vid) return;
+    if(Array.isArray(vid.sentences) && vid.sentences.length){
+      for(const s of vid.sentences) delete s.words;
+      for(const w of whisperWords){
+        const mid = (w.start + w.end) / 2;
+        let target = vid.sentences.find(s=> mid >= s.start && mid < s.end);
+        if(!target){ // gap between captions: nearest sentence wins
+          let best = Infinity;
+          for(const s of vid.sentences){
+            const dist = mid < s.start ? s.start - mid : mid - s.end;
+            if(dist < best){ best = dist; target = s; }
+          }
+        }
+        if(target){ (target.words ||= []).push({ w:w.w, start:w.start, end:w.end }); wordCount++; }
+      }
+      for(const s of vid.sentences) if(s.words) s.words.sort((a,b)=>a.start-b.start);
+      sentenceCount = vid.sentences.length;
+    } else {
+      vid.sentences = asr.sentences.map(s=>({ text:s.text, start:s.start, end:s.end, words:s.words }));
+      sentenceCount = vid.sentences.length;
+      wordCount = whisperWords.length;
+      vid.duration = vid.sentences.length ? vid.sentences[vid.sentences.length-1].end : vid.duration;
+      vid.transcriptSource = 'Whisper (word timestamps)';
+    }
+    vid.timingSource = 'whisper';
+    vid.whisperLanguage = asr.language || null;
+    if(!vid.sourceLang && asr.language) vid.sourceLang = asr.language;
+  });
+
+  return Response.json({ ok:true, timingSource:'whisper', language: asr.language || null, sentences: sentenceCount, words: wordCount });
+}

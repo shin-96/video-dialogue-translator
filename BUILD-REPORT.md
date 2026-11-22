@@ -80,8 +80,9 @@ phải tua theo, (4) tốc độ chạy chữ lệch nhiều so với giọng đ
     {sentences:[{text,start,end,words:[{w,start,end}]}]}. Audio được giải mã bằng
     ffmpeg→numpy (né đường PyAV của faster-whisper, vốn hỏng với PyAV ≥15 —
     lỗi `metadata_errors`). Model qua env `WHISPER_MODEL` (mặc định `tiny`).
-  - Venv tại `scripts/.venv` (đã gitignore): `python3 -m venv scripts/.venv &&
-    scripts/.venv/bin/pip install faster-whisper yt-dlp`.
+  - Venv nằm NGOÀI repo tại `~/workspace/vdt-whisper-venv` (~500MB, tuyệt đối
+    không commit): tạo bằng `bash scripts/setup-asr.sh`. Route tự tìm venv theo
+    thứ tự `$ASR_VENV` → `~/workspace/vdt-whisper-venv` → `scripts/.venv` (cũ).
   - API `POST /api/videos/[id]/align` (auth, đúng chủ video): upload/sample dùng file
     local, YouTube tải audio bằng yt-dlp của venv. Có phụ đề sẵn → MAP từ của Whisper
     lên câu phụ đề theo điểm giữa của từ (giữ nguyên chữ phụ đề); chưa có → dùng luôn

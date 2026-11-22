@@ -4,7 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { requireUser } from '@/lib/api';
 import { readDB, mutate } from '@/lib/store';
-import { resolveVenv, venvPython } from '@/lib/venv';
+import { resolveVenv, venvPython, pythonEnv } from '@/lib/venv';
 import { resolveAudioFile } from '@/lib/asrAudio';
 
 const run = promisify(execFile);
@@ -48,7 +48,7 @@ export async function POST(req, { params }){
   let asr;
   try{
     const { stdout } = await run(py, [script,'--input',inputFile,'--language',String(lang)],
-      { timeout: 600000, maxBuffer: 64*1024*1024, env:{ ...process.env, WHISPER_MODEL: process.env.WHISPER_MODEL || 'tiny' } });
+      { timeout: 600000, maxBuffer: 64*1024*1024, env: pythonEnv({ WHISPER_MODEL: process.env.WHISPER_MODEL || 'tiny' }) });
     const start = stdout.indexOf('{');
     asr = JSON.parse(stdout.slice(start));
   }catch(e){

@@ -1,2 +1,2 @@
 /** @type {import('next').NextConfig} */
-export default { serverExternalPackages: [] };
+export default { serverExternalPackages: ['playwright', 'playwright-core'] };

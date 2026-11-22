@@ -12,7 +12,11 @@ export async function GET(req, { params }){
   const fullText = v.sentences.map(s=>s.text).join(' ');
   const est = estimateTranslation(fullText);
   const used = quotaUsed(db, user.id);
-  return Response.json({ video: v, detection: detectLanguages(v.sentences), estimate: est, quota:{ used, limit: DAILY_QUOTA, remaining: DAILY_QUOTA-used } });
+  let detection = detectLanguages(v.sentences);
+  // Whisper already identified the language while transcribing — trust it
+  // when text-based detection has no answer.
+  if(!detection.length && v.sourceLang) detection = [{ code: v.sourceLang, pct: 100 }];
+  return Response.json({ video: v, detection, estimate: est, quota:{ used, limit: DAILY_QUOTA, remaining: DAILY_QUOTA-used } });
 }
 export async function PATCH(req, { params }){
   const { user, error } = await requireUser(); if(error) return error;

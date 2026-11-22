@@ -293,3 +293,88 @@ thúc bằng cảnh báo chết "ASR is not configured in this MVP". Mở khóa 
 - Phát lại video Bilibili trong trang xem vẫn là candidate trang player
   embed (Bilibili chỉ cấp DASH tách hình/tiếng, không có file gộp) — vòng
   này mở khóa PHẦN LỜI THOẠI/dịch/học, không thay đổi bản chất stream đó.
+
+## Headless extraction layer (2026-11-22, vòng sửa theo yêu cầu: "thêm Headless browser, bắt network trong cả iframe, auto-play")
+
+### Kiến trúc
+- **`lib/headless.js`** — `extractWithHeadless(pageUrl, { timeoutMs })`, stage (5)
+  CUỐI CÙNG trong `POST /api/detect-video`: chỉ chạy khi các stage trước
+  (direct → static/iframe scan → yt-dlp) không ra media file nào chơi được,
+  nên các đường nhanh không bao giờ bị chậm vì nó. Trần 60s/lần gọi,
+  tắt bằng `VDT_HEADLESS=0`.
+- **Bắt network ở cả 2 tầng** `page.on` + `context.on` cho request/response/
+  requestfailed: sự kiện request của Playwright bắn cho MỌI frame (kể cả
+  iframe cross-origin lồng nhau mà DOM không chạm được), mỗi candidate ghi
+  rõ `frameUrl` của frame đã phát request và `status` HTTP (0 = request chết
+  không có response). Lọc media `.(m3u8|mp4|webm|mov)`, loại host quảng cáo
+  như extension finder, bỏ qua segment `.ts`.
+- **Auto-play**: Chromium mở với `--autoplay-policy=no-user-gesture-required`
+  + `--mute-audio`; sau khi load, với mọi frame chạm được: mute + `play()`
+  mọi `<video>`, click các overlay quen thuộc (`.vjs-big-play-button`,
+  `.jw-display-icon-container`, `[class*="play" i]`…), click tâm iframe lớn
+  nhất; chờ request media đầu tiên + 5s settle để bắt rendition phụ.
+- **DOM harvest**: evaluate nguyên `extension/finder.js` trong main frame và
+  mọi child frame cùng origin, gộp candidate kind `headless-dom`.
+  Candidate network: m3u8 = 85, mp4 = 75, +10 nếu frame phát request trông
+  như player/embed. Response có engineNote riêng khi headless là stage tìm
+  ra hoặc khi nó cũng bó tay (vd trang bot-check).
+- **Cài đặt**: `bash scripts/setup-browser.sh` (`npm install` +
+  `npx playwright install chromium`); binary ~126MB nằm ở
+  `~/.cache/ms-playwright`, KHÔNG vào repo. `playwright` khai trong
+  dependencies + `serverExternalPackages` ở next.config.
+
+### Thực tế môi trường đã xử lý (VM này)
+Chromium không CONNECT qua egress proxy của VM được: `ERR_TUNNEL_CONNECTION_FAILED`
+dù proxy trả 200 cho CONNECT y hệt từ curl/Node/Python (đã kiểm chứng bằng
+net-log của Chromium + replay ClientHello ở mức gói tin — lỗi của riêng
+đường Chromium↔proxy, không phải do trang đích). Giải pháp trong
+`lib/headless.js`: khi có proxy env, dựng **relay loopback** bằng Node
+(Chromium → 127.0.0.1 relay → CONNECT lên upstream proxy bằng credential
+env → đích); Node CONNECT được proxy chấp nhận nên đường này chạy. Kèm
+`ignoreHTTPSErrors` khi có proxy (proxy chặn TLS dùng CA nội bộ). Trên máy
+người dùng không có proxy env thì Chromium đi thẳng, không qua relay.
+
+### Bằng chứng test (server production, code cuối)
+- **motphim** (`/xem-phim/anh-la-nam-chinh-doi-em/tap-1/vietsub?server=kk`):
+  qua pipeline, stage STATIC đã ra candidate trong ~2,4–3,3s (payload RSC
+  của Next.js chứa sẵn URL) — 2 `script-url` 55 + 1 `source` 35. Kiểm chứng
+  headless TRỰC TIẾP trên cùng trang tập phim: trang render đúng title,
+  auto-play chạy, **bắt được đúng playlist
+  `https://a.kvp726.com/20261026/oDOMGMuB/index.m3u8` kind
+  `headless-network` score 95 do iframe player
+  (`motphim.skin/api/v1/player?…`) phát ra** — cơ chế bắt network trong
+  iframe hoạt động đúng thiết kế. NHƯNG stream không phát được từ server
+  này: playlist trả **404 cho mọi lần fetch trực tiếp** (không Referer,
+  Referer trang xem, Referer nguyên frame player, Range hay full GET), và
+  trong phiên headless, JW Player không tiến triển (click tâm iframe +
+  gọi thẳng `jwplayer().play()` vẫn 0 response từ CDN, video readyState 0,
+  paused) → URL bị CDN khóa theo phiên/IP; egress datacenter bị từ chối.
+  **Không tuyên bố motphim phát được phía server** — đường chắc chắn với
+  nhóm này vẫn là extension trong trình duyệt của chính người dùng.
+- **animevietsub.bid** (link Ranma tập 11 của user): pipeline đầy đủ —
+  fetch 403, yt-dlp 403, headless chạy (~64s tổng) nhưng điều hướng chết
+  `ERR_CERT_AUTHORITY_INVALID` trong môi trường này (chuỗi cert qua proxy
+  chặn TLS bị bản headless từ chối cho host này dù đã bật ignoreHTTPSErrors;
+  bắt tay TLS thô tới host qua proxy cũng timeout) → candidates rỗng, API
+  trả engineNote ghép trung thực có cả kết quả headless. Site này vẫn ✗
+  phía server.
+- **Regression**: Mux direct ~0,1s; YouTube qua engine ~7,2s; sample 4 câu;
+  motphim detect 2,4s — headless KHÔNG kích hoạt khi stage trước đã có
+  media; `npm run build` PASS.
+
+### Ma trận hỗ trợ (cập nhật)
+| Loại trang | Đường thắng | Phát lại từ server |
+|---|---|---|
+| YouTube / site yt-dlp hỗ trợ | yt-dlp / captions | ✓ (trừ DRM) |
+| Link media trực tiếp | direct | ✓ |
+| Trang tĩnh / JS-config / iframe embed | static scan v2 | ✓ (đã test archive.org, Mux) |
+| Trang JS-app, stream không khóa phiên | headless (network iframe) | ✓ theo cơ chế — chờ ca thật để xác nhận trọn vẹn |
+| motphim (JS-app + CDN khóa phiên/IP) | detect ra URL (static/headless) | ✗ từ egress này (404) — dùng extension |
+| animevietsub (anti-bot 403 + TLS) | — | ✗ mọi đường server — dùng extension/upload |
+| Nội dung DRM (FairPlay/Widevine) | — | ✗ mọi trình duyệt ngoài player gốc |
+
+### Chi phí
+- Dung lượng: Chromium ~126MB (headless shell) trong cache người dùng.
+- Độ trễ detect khi headless kích hoạt: ~35–90s (trần route 60s cho riêng
+  stage này, cộng thời gian các stage trước); RAM ~200–400MB/phiên, mỗi
+  lần detect tối đa 1 browser, đóng ngay sau khi xong.

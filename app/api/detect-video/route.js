@@ -3,7 +3,8 @@ import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { resolveVenv, venvPython, venvHasCurlCffi } from '@/lib/venv';
+import { resolveVenv, venvPython, venvHasCurlCffi, pythonEnv } from '@/lib/venv';
+import { extractWithHeadless } from '@/lib/headless';
 
 const run = promisify(execFile);
 export const maxDuration = 240;
@@ -11,10 +12,14 @@ export const maxDuration = 240;
 // detect-video v2 — find the main video on an arbitrary page.
 // Pipeline: (1) direct media URL short-circuit, (2) deep static scan of the
 // page HTML *including <script> bodies and JS player configs*, (3) scan up to
-// 5 <iframe> embeds one level deep, (4) yt-dlp extractor engine as fallback.
-// Honest failure: bot-walled pages (e.g. anti-bot 403 checks) cannot be read
-// server-side; in that case we return an `engineNote` explaining exactly that
-// instead of pretending nothing was there.
+// 5 <iframe> embeds one level deep, (4) yt-dlp extractor engine as fallback,
+// (5) headless Chromium (lib/headless.js) as the LAST resort: renders the
+// page, auto-plays the player and captures media requests from all frames —
+// the only stage that can see JS-app players (e.g. motphim.skin). It is slow
+// (tens of seconds), so it runs only when no stage above found playable media.
+// Honest failure: bot-walled pages (e.g. anti-bot 403 checks) may defeat even
+// the headless browser; in that case we return an `engineNote` explaining
+// exactly that instead of pretending nothing was there.
 
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const PAGE_HEADERS = {
@@ -127,7 +132,7 @@ async function ytDlpExtract(url, fallbacks = []){
   async function runOnce(target){
     let stdout;
     try{
-      ({ stdout } = await run(py, [...baseArgs, target], { timeout: 45000, maxBuffer: 32 * 1024 * 1024 }));
+      ({ stdout } = await run(py, [...baseArgs, target], { timeout: 45000, maxBuffer: 32 * 1024 * 1024, env: pythonEnv() }));
     }catch(e){
       const errText = (e.stderr?.toString() || e.message || '').trim();
       const lastLine = errText.split('\n').filter(Boolean).pop() || 'unknown error';
@@ -231,18 +236,33 @@ export async function POST(req){
     }
   }
 
+  // (5) Headless browser — last resort, only when no stage above produced a
+  // playable media file (an embed-page candidate alone does not count).
+  let headlessNote = null, headlessFound = false;
+  const hasMediaNow = cands.some(c=>MEDIA_RE.test(c.src.split(/[?#]/)[0]));
+  if(!hasMediaNow){
+    const head = await extractWithHeadless(url, { timeoutMs: 60000 });
+    if(head.candidates.length){
+      merge(head.candidates);
+      headlessFound = head.candidates.some(c=>MEDIA_RE.test(c.src.split(/[?#]/)[0]));
+      if(head.title && (title === url)) title = head.title;
+    }
+    if(head.note) headlessNote = head.note;
+  }
+
   if(!cands.length){
-    const botWall = fetchStatus === 403 || /403|anti-bot|cloudflare/i.test(engineError || '');
+    const botWall = fetchStatus === 403 || /403|anti-bot|cloudflare/i.test(engineError || '') || /bot-check/i.test(headlessNote || '');
     if(botWall){
-      engineNote = `This site appears to block automated access (anti-bot protection${fetchStatus === 403 ? ': the server fetch got HTTP 403' : ': the extractor hit an HTTP 403 anti-bot challenge'}), so its video player cannot be reached from the server.${engineNote ? ' ' + engineNote : ''} Workaround: paste the direct video/embed link if you can copy it from the player, or download the episode and upload the file instead.`;
+      engineNote = `This site appears to block automated access (anti-bot protection${fetchStatus === 403 ? ': the server fetch got HTTP 403' : ': the extractor hit an HTTP 403 anti-bot challenge'}), so its video player cannot be reached from the server.${engineNote ? ' ' + engineNote : ''}${headlessNote ? ' Headless browser: ' + headlessNote + '.' : ''} Workaround: paste the direct video/embed link if you can copy it from the player, or download the episode and upload the file instead.`;
     } else if(fetchError){
-      engineNote = `Could not fetch that page from the server (${fetchError}).${engineNote ? ' ' + engineNote : ''} Try pasting the direct video link, or download the file and upload it instead.`;
-    } else if(engineNote){
-      engineNote = `No playable video was found by the page scan or the extractor engine. ${engineNote}`;
+      engineNote = `Could not fetch that page from the server (${fetchError}).${engineNote ? ' ' + engineNote : ''}${headlessNote ? ' Headless browser: ' + headlessNote + '.' : ''} Try pasting the direct video link, or download the file and upload it instead.`;
+    } else {
+      engineNote = `No playable video was found by the page scan or the extractor engine.${engineNote ? ' ' + engineNote : ''}${headlessNote ? ' Headless browser: ' + headlessNote + '.' : ''}`;
     }
   }
 
-  if(cands.length) engineNote = null; // a found candidate needs no failure note
+  if(cands.length && !headlessFound) engineNote = null; // found by a fast stage: no note needed
+  if(headlessFound) engineNote = 'Found by rendering the page in a headless browser and capturing the player\'s network requests (the page builds its player with JavaScript, so a plain fetch sees nothing).';
   cands.sort((a,b)=>b.score-a.score);
   const ambiguous = cands.length > 1 && (cands[0].score - (cands[1]?.score ?? 0)) < 20;
   return Response.json({ title, candidates: cands, ambiguous, ...(engineNote ? { engineNote } : {}) });

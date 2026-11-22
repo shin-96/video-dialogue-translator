@@ -19,6 +19,15 @@ import sys
 import tempfile
 import wave
 
+# Windows consoles/pipes default to a legacy code page (cp1252/cp1258) that
+# cannot encode Vietnamese/Chinese transcript text — json.dump below would
+# die with UnicodeEncodeError. Force UTF-8 on both output streams.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 
 def load_audio_16k(path):
     """Decode any audio/video file to a float32 16kHz mono numpy array via
